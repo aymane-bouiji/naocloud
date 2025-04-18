@@ -10,7 +10,7 @@ pipeline {
     parameters {
         booleanParam(name: 'initialise Terraform', defaultValue: false, description: 'Run Terraform Init to initialize the working directory')
         booleanParam(name: 'run Terraform plan', defaultValue: false, description: 'Run Terraform Plan to generate an execution plan')
-        booleanParam(name: 'create cluster - tf apply', defaultValue: false, description: 'Run Terraform Apply to apply the planned changes')
+        booleanParam(name: 'create cluster -tf apply', defaultValue: false, description: 'Run Terraform Apply to apply the planned changes')
         booleanParam(name: 'configure cluster - local registry', defaultValue: false, description: 'Run Ansible playbook to deploy AWS configurations')
         booleanParam(name: 'pull docker images, push to local registry', defaultValue: false, description: 'Run Ansible playbook to deploy Kubernetes and Helm')
         booleanParam(name: 'install helm charts', defaultValue: false, description: 'Run Ansible playbook to deploy Helm charts')
