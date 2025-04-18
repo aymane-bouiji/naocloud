@@ -46,7 +46,7 @@ pipeline {
         }
         stage('Terraform Apply') {
             when {
-                expression { params['create cluster - tf apply'] }
+                expression { params['create cluster -tf apply'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
