@@ -3,15 +3,15 @@ pipeline {
     environment {
         WORKSPACE_DIR = '/workspace'
         AWS_REGION = "${params.AWS_REGION}"
-
     }
     parameters {
-        booleanParam(name: 'RUN_TERRAFORM_INIT', defaultValue: false, description: 'Run Terraform Init to initialize the working directory')
-        booleanParam(name: 'RUN_TERRAFORM_PLAN', defaultValue: false, description: 'Run Terraform Plan to generate an execution plan')
-        booleanParam(name: 'RUN_TERRAFORM_APPLY', defaultValue: false, description: 'Run Terraform Apply to apply the planned changes')
-        booleanParam(name: 'RUN_ANSIBLE_DEPLOY', defaultValue: false, description: 'Run Ansible playbook to deploy Kubernetes and Helm')
-        booleanParam(name: 'RUN_HELM_DEPLOY', defaultValue: false, description: 'Run Ansible playbook to deploy Helm charts')
-        booleanParam(name: 'RUN_TERRAFORM_DESTROY', defaultValue: false, description: 'Run Terraform Destroy to delete all resources')
+        booleanParam(name: 'initialise Terraform', defaultValue: false, description: 'Run Terraform Init to initialize the working directory')
+        booleanParam(name: 'run Terraform plan', defaultValue: false, description: 'Run Terraform Plan to generate an execution plan')
+        booleanParam(name: 'create the  cluster infrastructure (EC2 VMs) - tf apply', defaultValue: false, description: 'Run Terraform Apply to apply the planned changes')
+        booleanParam(name: 'install and configure k8s components - add local registry', defaultValue: false, description: 'Run Ansible playbook to deploy AWS configurations')
+        booleanParam(name: 'pull docker images, push to local registry on master', defaultValue: false, description: 'Run Ansible playbook to deploy Kubernetes and Helm')
+        booleanParam(name: 'install helm charts ', defaultValue: false, description: 'Run Ansible playbook to deploy Helm charts')
+        booleanParam(name: 'destroy the cluster - tf destroy', defaultValue: false, description: 'Run Terraform Destroy to delete all resources')
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Confirm Terraform Destroy by entering "destroy" in this field')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region for operations (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log level: INFO or DEBUG. Defaults to INFO if invalid.')
@@ -19,11 +19,11 @@ pipeline {
     stages {
         stage('Terraform Init') {
             when {
-                expression { params.RUN_TERRAFORM_INIT }
+                expression { params['initialise Terraform'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir('/workspace/aws') {
+                    dir("${env.WORKSPACE_DIR}/aws") {
                         sh 'terraform init'
                     }
                 }
@@ -31,11 +31,11 @@ pipeline {
         }
         stage('Terraform Plan') {
             when {
-                expression { params.RUN_TERRAFORM_PLAN }
+                expression { params['run Terraform plan'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir('/workspace/aws') {
+                    dir("${env.WORKSPACE_DIR}/aws") {
                         sh 'terraform plan -out=tfplan'
                     }
                 }
@@ -43,11 +43,11 @@ pipeline {
         }
         stage('Terraform Apply') {
             when {
-                expression { params.RUN_TERRAFORM_APPLY }
+                expression { params['create the infrastructure (EC2 VMs) - tf apply'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir('/workspace/aws') {
+                    dir("${env.WORKSPACE_DIR}/aws") {
                         sh 'terraform apply -auto-approve tfplan'
                     }
                 }
@@ -56,14 +56,34 @@ pipeline {
         stage('Test AWS Inventory') {
             when {
                 anyOf {
+                    expression { params.RUN_ANSIBLE_AWS_DEPLOY }
                     expression { params.RUN_ANSIBLE_DEPLOY }
                     expression { params.RUN_HELM_DEPLOY }
                 }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir('/workspace/ansible') {
-                        sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
+                    dir("${env.WORKSPACE_DIR}/ansible") {
+                        sh "AWS_REGION=${env.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
+                    }
+                }
+            }
+        }
+        stage('Ansible Deploy K8s and Helm (AWS)') {
+            when {
+                expression { params.RUN_ANSIBLE_AWS_DEPLOY }
+            }
+            steps {
+                withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    dir("${env.WORKSPACE_DIR}/ansible") {
+                        sh '''
+                           chmod 600 /workspace/aws/id_rsa 
+
+
+                            ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
+                                --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
+                                -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
+                        '''
                     }
                 }
             }
@@ -74,10 +94,10 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir('/workspace/ansible') {
+                    dir("${env.WORKSPACE_DIR}/ansible") {
                         sh '''
                             ansible-playbook -i aws_ec2.yaml push_load_playbook.yaml \
-                                --private-key=/workspace/aws/id_rsa \
+                                --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
                                 -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                         '''
                     }
@@ -90,10 +110,10 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir('/workspace/ansible') {
+                    dir("${env.WORKSPACE_DIR}/ansible") {
                         sh '''
                             ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
-                                --private-key=/workspace/aws/id_rsa \
+                                --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
                                 -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                         '''
                     }
@@ -109,7 +129,7 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir('/workspace/aws') {
+                    dir("${env.WORKSPACE_DIR}/aws") {
                         sh 'terraform destroy -auto-approve'
                     }
                 }
