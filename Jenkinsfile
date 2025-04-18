@@ -69,7 +69,7 @@ pipeline {
                 }
             }
         }
-        stage('Ansible Deploy K8s and Helm (AWS)') {
+        stage('Configure cluster and local registry') {
             when {
                 expression { params.RUN_ANSIBLE_AWS_DEPLOY }
             }
@@ -88,7 +88,7 @@ pipeline {
                 }
             }
         }
-        stage('Ansible Deploy K8s and Helm') {
+        stage('pull ecr images, push to local registry') {
             when {
                 expression { params.RUN_ANSIBLE_DEPLOY }
             }
@@ -104,7 +104,7 @@ pipeline {
                 }
             }
         }
-        stage('Helm Deploy') {
+        stage('Helm Deploy charts ') {
             when {
                 expression { params.RUN_HELM_DEPLOY }
             }
@@ -120,7 +120,7 @@ pipeline {
                 }
             }
         }
-        stage('Terraform Destroy') {
+        stage('Terraform Destroy cluster') {
             when {
                 allOf {
                     expression { params.RUN_TERRAFORM_DESTROY }
