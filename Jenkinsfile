@@ -4,13 +4,16 @@ pipeline {
         WORKSPACE_DIR = '/workspace'
         AWS_REGION = "${params.AWS_REGION}"
     }
+    triggers {
+        pollSCM('H/5 * * * *')
+    }
     parameters {
         booleanParam(name: 'initialise Terraform', defaultValue: false, description: 'Run Terraform Init to initialize the working directory')
         booleanParam(name: 'run Terraform plan', defaultValue: false, description: 'Run Terraform Plan to generate an execution plan')
-        booleanParam(name: 'create the  cluster infrastructure (EC2 VMs) - tf apply', defaultValue: false, description: 'Run Terraform Apply to apply the planned changes')
-        booleanParam(name: 'install and configure k8s components - add local registry', defaultValue: false, description: 'Run Ansible playbook to deploy AWS configurations')
-        booleanParam(name: 'pull docker images, push to local registry on master', defaultValue: false, description: 'Run Ansible playbook to deploy Kubernetes and Helm')
-        booleanParam(name: 'install helm charts ', defaultValue: false, description: 'Run Ansible playbook to deploy Helm charts')
+        booleanParam(name: 'create cluster - tf apply', defaultValue: false, description: 'Run Terraform Apply to apply the planned changes')
+        booleanParam(name: 'configure cluster - local registry', defaultValue: false, description: 'Run Ansible playbook to deploy AWS configurations')
+        booleanParam(name: 'pull docker images, push to local registry', defaultValue: false, description: 'Run Ansible playbook to deploy Kubernetes and Helm')
+        booleanParam(name: 'install helm charts', defaultValue: false, description: 'Run Ansible playbook to deploy Helm charts')
         booleanParam(name: 'destroy the cluster - tf destroy', defaultValue: false, description: 'Run Terraform Destroy to delete all resources')
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Confirm Terraform Destroy by entering "destroy" in this field')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region for operations (e.g., eu-west-1)')
@@ -43,7 +46,7 @@ pipeline {
         }
         stage('Terraform Apply') {
             when {
-                expression { params['create the infrastructure (EC2 VMs) - tf apply'] }
+                expression { params['create cluster - tf apply'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -56,9 +59,9 @@ pipeline {
         stage('Test AWS Inventory') {
             when {
                 anyOf {
-                    expression { params.RUN_ANSIBLE_AWS_DEPLOY }
-                    expression { params.RUN_ANSIBLE_DEPLOY }
-                    expression { params.RUN_HELM_DEPLOY }
+                    expression { params['configure cluster - local registry'] }
+                    expression { params['pull docker images, push to local registry'] }
+                    expression { params['install helm charts'] }
                 }
             }
             steps {
@@ -71,18 +74,16 @@ pipeline {
         }
         stage('Configure cluster and local registry') {
             when {
-                expression { params.RUN_ANSIBLE_AWS_DEPLOY }
+                expression { params['configure cluster - local registry'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     dir("${env.WORKSPACE_DIR}/ansible") {
                         sh '''
                            chmod 600 /workspace/aws/id_rsa 
-
-
-                            ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
-                                --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
-                                -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
+                           ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
+                               --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
+                               -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                         '''
                     }
                 }
@@ -90,31 +91,31 @@ pipeline {
         }
         stage('pull ecr images, push to local registry') {
             when {
-                expression { params.RUN_ANSIBLE_DEPLOY }
+                expression { params['pull docker images, push to local registry'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     dir("${env.WORKSPACE_DIR}/ansible") {
                         sh '''
-                            ansible-playbook -i aws_ec2.yaml push_load_playbook.yaml \
-                                --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
-                                -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
+                           ansible-playbook -i aws_ec2.yaml push_load_playbook.yaml \
+                               --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
+                               -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                         '''
                     }
                 }
             }
         }
-        stage('Helm Deploy charts ') {
+        stage('Helm Deploy charts') {
             when {
-                expression { params.RUN_HELM_DEPLOY }
+                expression { params['install helm charts'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     dir("${env.WORKSPACE_DIR}/ansible") {
                         sh '''
-                            ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
-                                --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
-                                -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
+                           ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
+                               --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
+                               -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                         '''
                     }
                 }
@@ -123,7 +124,7 @@ pipeline {
         stage('Terraform Destroy cluster') {
             when {
                 allOf {
-                    expression { params.RUN_TERRAFORM_DESTROY }
+                    expression { params['destroy the cluster - tf destroy'] }
                     expression { params.DESTROY_CONFIRMATION == 'destroy' }
                 }
             }
