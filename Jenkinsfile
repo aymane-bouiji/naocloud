@@ -1,9 +1,5 @@
 pipeline {
     agent any
-    environment {
-        WORKSPACE_DIR = '/workspace'
-        AWS_REGION = "${params.AWS_REGION}"
-    }
     triggers {
         pollSCM('H/5 * * * *')
     }
@@ -26,7 +22,7 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("${env.WORKSPACE_DIR}/aws") {
+                    dir("/workspace/aws") {
                         sh 'terraform init'
                     }
                 }
@@ -38,7 +34,7 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("${env.WORKSPACE_DIR}/aws") {
+                    dir("/workspace/aws") {
                         sh 'terraform plan -out=tfplan'
                     }
                 }
@@ -50,7 +46,7 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("${env.WORKSPACE_DIR}/aws") {
+                    dir("/workspace/aws") {
                         sh 'terraform apply -auto-approve tfplan'
                     }
                 }
@@ -66,8 +62,8 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("${env.WORKSPACE_DIR}/ansible") {
-                        sh "AWS_REGION=${env.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
+                    dir("/workspace/ansible") {
+                        sh "AWS_REGION=eu-west-1 ansible-inventory -i aws_ec2.yaml --list"
                     }
                 }
             }
@@ -78,11 +74,11 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("${env.WORKSPACE_DIR}/ansible") {
+                    dir("/workspace/ansible") {
                         sh '''
-                           chmod 600 /workspace/aws/id_rsa 
+                           chmod 600 /workspace/aws/id_rsa
                            ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
-                               --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
+                               --private-key=/workspace/aws/id_rsa \
                                -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                         '''
                     }
@@ -95,10 +91,10 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("${env.WORKSPACE_DIR}/ansible") {
+                    dir("/workspace/ansible") {
                         sh '''
                            ansible-playbook -i aws_ec2.yaml push_load_playbook.yaml \
-                               --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
+                               --private-key=/workspace/aws/id_rsa \
                                -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                         '''
                     }
@@ -111,10 +107,10 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("${env.WORKSPACE_DIR}/ansible") {
+                    dir("/workspace/ansible") {
                         sh '''
                            ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
-                               --private-key=${env.WORKSPACE_DIR}/aws/id_rsa \
+                               --private-key=/workspace/aws/id_rsa \
                                -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                         '''
                     }
@@ -130,7 +126,7 @@ pipeline {
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("${env.WORKSPACE_DIR}/aws") {
+                    dir("/workspace/aws") {
                         sh 'terraform destroy -auto-approve'
                     }
                 }
