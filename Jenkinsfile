@@ -4,10 +4,10 @@ pipeline {
         pollSCM('H/5 * * * *')
     }
     parameters {
-        booleanParam(name: 'infrastructureBootstrapping', defaultValue: false, description: 'Set up and create the cloud environment')
-        booleanParam(name: 'infrastructureConfiguration', defaultValue: false, description: 'Configure the cloud setup and manage application images')
-        booleanParam(name: 'applicationDeployment', defaultValue: false, description: 'Deploy applications to the cloud')
-        booleanParam(name: 'destroyInfrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
+        booleanParam(name: 'infrastructure Bootstrapping', defaultValue: false, description: 'Set up and create the cloud environment')
+        booleanParam(name: 'infrastructure Configuration', defaultValue: false, description: 'Configure the cloud setup and manage application images')
+        booleanParam(name: 'application Deployment', defaultValue: false, description: 'Deploy applications to the cloud')
+        booleanParam(name: 'destroy Infrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
@@ -15,7 +15,7 @@ pipeline {
     stages {
         stage('Infrastructure Bootstrapping') {
             when {
-                expression { params['infrastructureBootstrapping'] }
+                expression { params['infrastructure Bootstrapping'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -29,7 +29,7 @@ pipeline {
         }
         stage('Infrastructure Configuration') {
             when {
-                expression { params['infrastructureConfiguration'] }
+                expression { params['infrastructure Configuration'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -51,7 +51,7 @@ pipeline {
         }
         stage('Application Deployment') {
             when {
-                expression { params['applicationDeployment'] }
+                expression { params['application Deployment'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -68,7 +68,7 @@ pipeline {
         stage('Destroy Infrastructure') {
             when {
                 allOf {
-                    expression { params['destroyInfrastructure'] }
+                    expression { params['destroy Infrastructure'] }
                     expression { params.DESTROY_CONFIRMATION == 'destroy' }
                 }
             }
