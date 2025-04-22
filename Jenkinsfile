@@ -4,18 +4,18 @@ pipeline {
         pollSCM('H/5 * * * *')
     }
     parameters {
-        booleanParam(name: 'infrastructure_bootstrapping', defaultValue: false, description: 'Run Terraform Init, Plan, and Apply to initialize and create infrastructure')
-        booleanParam(name: 'infrastructure_configuration', defaultValue: false, description: 'Run Ansible playbooks to configure cluster, local registry, and manage Docker images')
-        booleanParam(name: 'application_deployment', defaultValue: false, description: 'Run Ansible playbook to deploy Helm charts')
-        booleanParam(name: 'destroy_infrastructure', defaultValue: false, description: 'Run Terraform Destroy to delete all resources')
-        string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Confirm Terraform Destroy by entering "destroy" in this field')
-        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region for operations (e.g., eu-west-1)')
-        string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log level: INFO or DEBUG. Defaults to INFO if invalid.')
+        booleanParam(name: 'infrastructureBootstrapping', defaultValue: false, description: 'Set up and create the cloud environment')
+        booleanParam(name: 'infrastructureConfiguration', defaultValue: false, description: 'Configure the cloud setup and manage application images')
+        booleanParam(name: 'applicationDeployment', defaultValue: false, description: 'Deploy applications to the cloud')
+        booleanParam(name: 'destroyInfrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
+        string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
+        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
+        string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
     }
     stages {
         stage('Infrastructure Bootstrapping') {
             when {
-                expression { params['infrastructure_bootstrapping'] }
+                expression { params['infrastructureBootstrapping'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -29,7 +29,7 @@ pipeline {
         }
         stage('Infrastructure Configuration') {
             when {
-                expression { params['infrastructure_configuration'] }
+                expression { params['infrastructureConfiguration'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -51,7 +51,7 @@ pipeline {
         }
         stage('Application Deployment') {
             when {
-                expression { params['application_deployment'] }
+                expression { params['applicationDeployment'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -68,7 +68,7 @@ pipeline {
         stage('Destroy Infrastructure') {
             when {
                 allOf {
-                    expression { params['destroy_infrastructure'] }
+                    expression { params['destroyInfrastructure'] }
                     expression { params.DESTROY_CONFIRMATION == 'destroy' }
                 }
             }
