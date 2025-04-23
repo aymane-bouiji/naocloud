@@ -1,7 +1,7 @@
 pipeline {
     agent any
     triggers {
-        pollSCM('H/5 * * * *')
+        pollSCM('*/5 * * * *')
     }
     parameters {
         booleanParam(name: 'Infrastructure Bootstrapping', defaultValue: false, description: 'Set up and create the cloud environment')
