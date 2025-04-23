@@ -69,7 +69,7 @@ pipeline {
         }
         stage('Stop EC2 Instances') {
             when {
-                expression { params['pause Virtual Machines'] }
+                expression { params['Pause Virtual Machines'] }
             }
             steps {
                 withCredentials([[
