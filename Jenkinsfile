@@ -67,7 +67,7 @@ pipeline {
                 }
             }
         }
-        stage('Stop EC2 Instances') {
+        stage('Stop Server') {
             when {
                 expression { params['Pause Virtual Machines'] }
             }
@@ -99,7 +99,7 @@ pipeline {
                 }
             }
         }
-        stage('Start EC2 Instances') {
+        stage('Start Server') {
             when {
                 expression { params['Start Virtual Machines'] }
             }
