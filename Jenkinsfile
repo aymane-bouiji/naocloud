@@ -4,12 +4,12 @@ pipeline {
         pollSCM('H/5 * * * *')
     }
     parameters {
-        booleanParam(name: 'infrastructure Bootstrapping', defaultValue: false, description: 'Set up and create the cloud environment')
-        booleanParam(name: 'infrastructure Configuration', defaultValue: false, description: 'Configure the cloud setup and manage application images')
-        booleanParam(name: 'application Deployment', defaultValue: false, description: 'Deploy applications to the cloud')
-        booleanParam(name: 'destroy Infrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
-        booleanParam(name: 'pause Virtual Machines', defaultValue: false, description: 'Pause (stop) the EC2 virtual machines')
-        booleanParam(name: 'start Virtual Machines', defaultValue: false, description: 'Start the stopped EC2 virtual machines')
+        booleanParam(name: 'Infrastructure Bootstrapping', defaultValue: false, description: 'Set up and create the cloud environment')
+        booleanParam(name: 'Infrastructure Configuration', defaultValue: false, description: 'Configure the cloud setup and manage Application images')
+        booleanParam(name: 'Application Deployment', defaultValue: false, description: 'Deploy applications to the cloud')
+        booleanParam(name: 'Destroy Infrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
+        booleanParam(name: 'pause Virtual Machines', defaultValue: false, description: 'Pause (stop) the server')
+        booleanParam(name: 'Start Virtual Machines', defaultValue: false, description: 'Start the stopped server')
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
@@ -17,7 +17,7 @@ pipeline {
     stages {
         stage('Infrastructure Bootstrapping') {
             when {
-                expression { params['infrastructure Bootstrapping'] }
+                expression { params['Infrastructure Bootstrapping'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -31,7 +31,7 @@ pipeline {
         }
         stage('Infrastructure Configuration') {
             when {
-                expression { params['infrastructure Configuration'] }
+                expression { params['Infrastructure Configuration'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -53,7 +53,7 @@ pipeline {
         }
         stage('Application Deployment') {
             when {
-                expression { params['application Deployment'] }
+                expression { params['Application Deployment'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -101,7 +101,7 @@ pipeline {
         }
         stage('Start EC2 Instances') {
             when {
-                expression { params['start Virtual Machines'] }
+                expression { params['Start Virtual Machines'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -129,14 +129,14 @@ pipeline {
         stage('Destroy Infrastructure') {
             when {
                 allOf {
-                    expression { params['destroy Infrastructure'] }
+                    expression { params['Destroy Infrastructure'] }
                     expression { params.DESTROY_CONFIRMATION == 'destroy' }
                 }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     dir("/workspace/aws") {
-                        sh 'terraform destroy -auto-approve'
+                        sh 'terraform Destroy -auto-approve'
                     }
                 }
             }
