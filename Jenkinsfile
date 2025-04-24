@@ -8,8 +8,8 @@ pipeline {
         booleanParam(name: 'Infrastructure Configuration', defaultValue: false, description: 'Configure the cloud setup and manage Application images')
         booleanParam(name: 'Application Deployment', defaultValue: false, description: 'Deploy applications to the cloud')
         booleanParam(name: 'Destroy Infrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
-        booleanParam(name: 'Pause Virtual Machines', defaultValue: false, description: 'Pause (stop) the server')
-        booleanParam(name: 'Start Virtual Machines', defaultValue: false, description: 'Start the stopped server')
+        booleanParam(name: 'Stop running Server', defaultValue: false, description: 'Pause (stop) the server')
+        booleanParam(name: 'Start Server', defaultValue: false, description: 'Start the stopped server')
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
@@ -69,7 +69,7 @@ pipeline {
         }
         stage('Stop Server') {
             when {
-                expression { params['Pause Virtual Machines'] }
+                expression { params['Stop running Server'] }
             }
             steps {
                 withCredentials([[
