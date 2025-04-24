@@ -101,7 +101,7 @@ pipeline {
         }
         stage('Start Server') {
             when {
-                expression { params['Start Virtual Machines'] }
+                expression { params['Start Server'] }
             }
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
