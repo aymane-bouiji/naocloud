@@ -10,7 +10,7 @@ pipeline {
         booleanParam(name: 'Destroy Infrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
         booleanParam(name: 'Stop running Server', defaultValue: false, description: 'Pause (stop) the server')
         booleanParam(name: 'Start Server', defaultValue: false, description: 'Start the stopped server')
-        string(name: 'DESTROY CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
+        string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
     }
@@ -130,7 +130,7 @@ pipeline {
             when {
                 allOf {
                     expression { params['Destroy Infrastructure'] }
-                    expression { params.DESTROY CONFIRMATION == 'destroy' }
+                    expression { params.DESTROY_CONFIRMATION == 'destroy' }
                 }
             }
             steps {
