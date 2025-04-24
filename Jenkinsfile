@@ -37,7 +37,11 @@ pipeline {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     dir("/workspace/ansible") {
                         sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
-                        
+                        sh '''
+                           ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
+                               --private-key=/workspace/aws/id_rsa \
+                               -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
+                        '''
                         sh '''
                            ansible-playbook -i aws_ec2.yaml push_load_playbook.yaml \
                                --private-key=/workspace/aws/id_rsa \
