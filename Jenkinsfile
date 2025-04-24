@@ -41,7 +41,7 @@ pipeline {
                         sh '''
                            ansible-playbook -i aws_ec2.yaml push_load_playbook.yaml \
                                --private-key=/workspace/aws/id_rsa \
-                               -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no' aws_access_key_id=$AWS_ACCESS_KEY_ID aws_secret_access_key=$AWS_SECRET_ACCESS_KEY""
+                               -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no' aws_access_key_id=$AWS_ACCESS_KEY_ID aws_secret_access_key=$AWS_SECRET_ACCESS_KEY"
                         '''
                     }
                 }
