@@ -132,7 +132,7 @@ pipeline {
             steps {
                 withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     dir("/workspace/aws") {
-                        sh 'terraform Destroy -auto-approve'
+                        sh 'terraform destroy -auto-approve'
                     }
                 }
             }
