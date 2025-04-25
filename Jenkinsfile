@@ -1,7 +1,7 @@
 pipeline {
     agent any
     triggers {
-        pollSCM('*/2 * * * *')
+        pollSCM('*/5 * * * *')
     }
     parameters {
         booleanParam(name: 'Infrastructure Bootstrapping', defaultValue: false, description: 'Set up and create the cloud environment')
@@ -126,19 +126,19 @@ pipeline {
             }
             steps {
                 sh '''
+                    set +x
                     export AWS_DEFAULT_REGION=${AWS_REGION}
+                    echo "=== Worker Instance Public IP Addresses ==="
                     WORKER_IPS=$(aws ec2 describe-instances \
                         --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
                         --query "Reservations[].Instances[].PublicIpAddress" \
                         --output text)
                     if [ -n "$WORKER_IPS" ]; then
-                        echo "Worker Instance Public IPs:"
-                        echo "$WORKER_IPS" | tr '[:space:]' '\n' | while read ip; do
-                            echo "  - $ip"
-                        done
+                        echo "$WORKER_IPS" | tr '[:space:]' '\n' | awk 'NF {print "Worker " NR ": " $1}'
                     else
                         echo "No running worker instances found with tag Name=worker_instance"
                     fi
+                    echo "=========================================="
                 '''
             }
         }
