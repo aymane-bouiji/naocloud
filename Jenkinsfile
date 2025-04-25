@@ -10,6 +10,7 @@ pipeline {
         booleanParam(name: 'Destroy Infrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
         booleanParam(name: 'Stop running Server', defaultValue: false, description: 'Pause (stop) the server')
         booleanParam(name: 'Start Server', defaultValue: false, description: 'Start the stopped server')
+        booleanParam(name: 'Display Addresses', defaultValue: false, description: 'Display public IP addresses of worker instances')
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
@@ -34,12 +35,6 @@ pipeline {
             steps {
                 dir("/workspace/ansible") {
                     sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
-                   /* sh '''
-                        ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
-                            --private-key=/workspace/aws/id_rsa \
-                            -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
-                    '''*/
-
                     sh '''
                         ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
                             --private-key=/workspace/aws/id_rsa \
@@ -123,6 +118,28 @@ pipeline {
                 dir("/workspace/aws") {
                     sh 'terraform destroy -auto-approve'
                 }
+            }
+        }
+        stage('Display addresses of the server') {
+            when {
+                expression { params['Display Addresses'] }
+            }
+            steps {
+                sh '''
+                    export AWS_DEFAULT_REGION=${AWS_REGION}
+                    WORKER_IPS=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
+                        --query "Reservations[].Instances[].PublicIpAddress" \
+                        --output text)
+                    if [ -n "$WORKER_IPS" ]; then
+                        echo "Worker Instance Public IPs:"
+                        echo "$WORKER_IPS" | tr '[:space:]' '\n' | while read ip; do
+                            echo "  - $ip"
+                        done
+                    else
+                        echo "No running worker instances found with tag Name=worker_instance"
+                    fi
+                '''
             }
         }
     }
