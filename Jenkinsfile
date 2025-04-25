@@ -10,7 +10,7 @@ pipeline {
         booleanParam(name: 'Destroy Infrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
         booleanParam(name: 'Stop running Server', defaultValue: false, description: 'Pause (stop) the server')
         booleanParam(name: 'Start Server', defaultValue: false, description: 'Start the stopped server')
-        booleanParam(name: 'Display Addresses', defaultValue: false, description: 'Display public IP addresses of worker instances')
+        booleanParam(name: 'Display Addresses', defaultValue: false, description: 'Display addresses of running server')
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
@@ -128,17 +128,21 @@ pipeline {
                 sh '''
                     set +x
                     export AWS_DEFAULT_REGION=${AWS_REGION}
-                    echo "=== Worker Instance Public IP Addresses ==="
-                    WORKER_IPS=$(aws ec2 describe-instances \
+                    echo "=== Worker Instance Public Addresses ==="
+                    WORKER_DATA=$(aws ec2 describe-instances \
                         --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
-                        --query "Reservations[].Instances[].PublicIpAddress" \
+                        --query "Reservations[].Instances[].[PublicIpAddress,PublicDnsName]" \
                         --output text)
-                    if [ -n "$WORKER_IPS" ]; then
-                        echo "$WORKER_IPS" | tr '[:space:]' '\n' | awk 'NF {print "Worker " NR ": " $1}'
+                    if [ -n "$WORKER_DATA" ]; then
+                        echo "$WORKER_DATA" | while read -r ip dns; do
+                            echo "Worker $((i+=1)):"
+                            echo "  Public IP: $ip"
+                            echo "  Public DNS: $dns"
+                        done
                     else
                         echo "No running worker instances found with tag Name=worker_instance"
                     fi
-                    echo "=========================================="
+                    echo "======================================"
                 '''
             }
         }
