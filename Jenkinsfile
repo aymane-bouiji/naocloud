@@ -35,7 +35,7 @@ pipeline {
                 dir("/workspace/ansible") {
                     sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
                     sh '''
-                        ansible-playbook -i aws_ec2.yaml aws_playbook-1.yaml \
+                        ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
                             --private-key=/workspace/aws/id_rsa \
                             -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                     '''
