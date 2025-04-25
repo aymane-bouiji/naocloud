@@ -20,12 +20,10 @@ pipeline {
                 expression { params['Infrastructure Bootstrapping'] }
             }
             steps {
-                withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("/workspace/aws") {
-                        sh 'terraform init'
-                        sh 'terraform plan -out=tfplan'
-                        sh 'terraform apply -auto-approve tfplan'
-                    }
+                dir("/workspace/aws") {
+                    sh 'terraform init'
+                    sh 'terraform plan -out=tfplan'
+                    sh 'terraform apply -auto-approve tfplan'
                 }
             }
         }
@@ -34,16 +32,13 @@ pipeline {
                 expression { params['Infrastructure Configuration'] }
             }
             steps {
-                withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("/workspace/ansible") {
-                        sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
-                        
-                        sh '''
-                           ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
-                               --private-key=/workspace/aws/id_rsa \
-                               -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no' aws_access_key_id=$AWS_ACCESS_KEY_ID aws_secret_access_key=$AWS_SECRET_ACCESS_KEY"
-                        '''
-                    }
+                dir("/workspace/ansible") {
+                    sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
+                    sh '''
+                        ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
+                            --private-key=/workspace/aws/id_rsa \
+                            -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
+                    '''
                 }
             }
         }
@@ -52,14 +47,12 @@ pipeline {
                 expression { params['Application Deployment'] }
             }
             steps {
-                withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("/workspace/ansible") {
-                        sh '''
-                           ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
-                               --private-key=/workspace/aws/id_rsa \
-                               -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
-                        '''
-                    }
+                dir("/workspace/ansible") {
+                    sh '''
+                        ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
+                            --private-key=/workspace/aws/id_rsa \
+                            -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
+                    '''
                 }
             }
         }
@@ -68,31 +61,24 @@ pipeline {
                 expression { params['Stop running Server'] }
             }
             steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws-access-key-id',
-                    accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                    secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-                ]]) {
-                    sh '''
-                        export AWS_DEFAULT_REGION=${AWS_REGION}
-                        MASTER_IDS=$(aws ec2 describe-instances \
-                            --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=running,pending" \
-                            --query "Reservations[].Instances[].InstanceId" \
-                            --output text)
-                        WORKER_IDS=$(aws ec2 describe-instances \
-                            --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
-                            --query "Reservations[].Instances[].InstanceId" \
-                            --output text)
-                        INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
-                        if [ -n "$INSTANCE_IDS" ]; then
-                            echo "Stopping instances: $INSTANCE_IDS"
-                            aws ec2 stop-instances --instance-ids $INSTANCE_IDS
-                        else
-                            echo "No running instances found with tags Name=master_instance or Name=worker_instance"
-                        fi
-                    '''
-                }
+                sh '''
+                    export AWS_DEFAULT_REGION=${AWS_REGION}
+                    MASTER_IDS=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=running,pending" \
+                        --query "Reservations[].Instances[].InstanceId" \
+                        --output text)
+                    WORKER_IDS=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
+                        --query "Reservations[].Instances[].InstanceId" \
+                        --output text)
+                    INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
+                    if [ -n "$INSTANCE_IDS" ]; then
+                        echo "Stopping instances: $INSTANCE_IDS"
+                        aws ec2 stop-instances --instance-ids $INSTANCE_IDS
+                    else
+                        echo "No running instances found with tags Name=master_instance or Name=worker_instance"
+                    fi
+                '''
             }
         }
         stage('Start Server') {
@@ -100,26 +86,24 @@ pipeline {
                 expression { params['Start Server'] }
             }
             steps {
-                withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    sh '''
-                        export AWS_DEFAULT_REGION=${AWS_REGION}
-                        MASTER_IDS=$(aws ec2 describe-instances \
-                            --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=stopped" \
-                            --query "Reservations[].Instances[].InstanceId" \
-                            --output text)
-                        WORKER_IDS=$(aws ec2 describe-instances \
-                            --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=stopped" \
-                            --query "Reservations[].Instances[].InstanceId" \
-                            --output text)
-                        INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
-                        if [ -n "$INSTANCE_IDS" ]; then
-                            echo "Starting instances: $INSTANCE_IDS"
-                            aws ec2 start-instances --instance-ids $INSTANCE_IDS
-                        else
-                            echo "No stopped instances found with tags Name=master_instance or Name=worker_instance"
-                        fi
-                    '''
-                }
+                sh '''
+                    export AWS_DEFAULT_REGION=${AWS_REGION}
+                    MASTER_IDS=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=stopped" \
+                        --query "Reservations[].Instances[].InstanceId" \
+                        --output text)
+                    WORKER_IDS=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=stopped" \
+                        --query "Reservations[].Instances[].InstanceId" \
+                        --output text)
+                    INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
+                    if [ -n "$INSTANCE_IDS" ]; then
+                        echo "Starting instances: $INSTANCE_IDS"
+                        aws ec2 start-instances --instance-ids $INSTANCE_IDS
+                    else
+                        echo "No stopped instances found with tags Name=master_instance or Name=worker_instance"
+                    fi
+                '''
             }
         }
         stage('Destroy Infrastructure') {
@@ -130,10 +114,8 @@ pipeline {
                 }
             }
             steps {
-                withCredentials([aws(credentialsId: 'aws-access-key-id', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-                    dir("/workspace/aws") {
-                        sh 'terraform destroy -auto-approve'
-                    }
+                dir("/workspace/aws") {
+                    sh 'terraform destroy -auto-approve'
                 }
             }
         }
