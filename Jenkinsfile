@@ -14,6 +14,7 @@ pipeline {
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
+        string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
     }
     stages {
         stage('Infrastructure Bootstrapping') {
@@ -35,11 +36,18 @@ pipeline {
             steps {
                 dir("/workspace/ansible") {
                     sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
-                    sh '''
+                    sh """
+                        ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
+                            --private-key=/workspace/aws/id_rsa \
+                            -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
+                           
+                    """
+                    sh """
                         ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
                             --private-key=/workspace/aws/id_rsa \
-                            -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
-                    '''
+                            -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
+                            -e \"naocloud_tag=${params.CLUSTER_VERSION}\"
+                    """
                 }
             }
         }
@@ -49,11 +57,12 @@ pipeline {
             }
             steps {
                 dir("/workspace/ansible") {
-                    sh '''
+                    sh """
                         ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
                             --private-key=/workspace/aws/id_rsa \
-                            -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
-                    '''
+                            -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
+                            -e \"image_tag=${params.CLUSTER_VERSION}\"
+                    """
                 }
             }
         }
