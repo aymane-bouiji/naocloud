@@ -42,7 +42,7 @@ pipeline {
                             --private-key=/workspace/aws/id_rsa \
                             -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
                             -e \"naocloud_tag=${params.CLUSTER_VERSION}\
-                            -e \"naogizmo_tag=${params.CLUSTER_VERSION}\"
+                            -e \"naogizmo_tag=${params.CLUSTER_VERSION}"
                     """
                 }
             }
