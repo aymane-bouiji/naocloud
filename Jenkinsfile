@@ -41,7 +41,7 @@ pipeline {
                         ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
                             --private-key=/workspace/aws/id_rsa \
                             -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
-                            -e \"naocloud_tag=${params.CLUSTER_VERSION}\
+                            -e \"naocloud_tag=${params.CLUSTER_VERSION}" \
                             -e \"naogizmo_tag=${params.CLUSTER_VERSION}"
                     """
                 }
