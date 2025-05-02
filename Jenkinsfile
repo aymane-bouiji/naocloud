@@ -1,7 +1,7 @@
 pipeline {
     agent any
     triggers {
-        pollSCM('*/5 * * * *')
+        pollSCM('*/2 * * * *')
     }
     parameters {
         activeChoices(name: 'ACTION', description: 'Select the action to perform based on server state', script: '''
