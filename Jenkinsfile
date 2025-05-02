@@ -18,53 +18,86 @@ pipeline {
     }
     stages {
         stage('Parameter Validation') {
-    steps {
-        script {
-            // Contradictory actions
-            if (params['Start Server'] && params['Stop running Server']) {
-                error("❌ You cannot start and stop the server at the same time. Please select only one.")
-            }
+            steps {
+                script {
+                    // Contradictory actions
+                    if (params['Start Server'] && params['Stop running Server']) {
+                        error("❌ You cannot start and stop the server at the same time. Please select only one.")
+                    }
 
-            if (params['Infrastructure Bootstrapping'] && params['Destroy Infrastructure']) {
-                error("❌ You cannot bootstrap and destroy infrastructure at the same time. Please select only one.")
-            }
+                    if (params['Infrastructure Bootstrapping'] && params['Destroy Infrastructure']) {
+                        error("❌ You cannot bootstrap and destroy infrastructure at the same time. Please select only one.")
+                    }
 
-            if (params['Destroy Infrastructure'] && (
-                params['Infrastructure Configuration'] ||
-                params['Application Deployment'] ||
-                params['Start Server'] ||
-                params['Stop running Server'] ||
-                params['Display Addresses']
-            )) {
-                error("❌ Cannot perform other actions while destroying infrastructure. Please deselect all except 'Destroy Infrastructure'.")
-            }
+                    if (params['Destroy Infrastructure'] && (
+                        params['Infrastructure Configuration'] ||
+                        params['Application Deployment'] ||
+                        params['Start Server'] ||
+                        params['Stop running Server'] ||
+                        params['Display Addresses']
+                    )) {
+                        error("❌ Cannot perform other actions while destroying infrastructure. Please deselect all except 'Destroy Infrastructure'.")
+                    }
 
-            if (params['Destroy Infrastructure'] && params.DESTROY_CONFIRMATION != 'destroy') {
-                error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
-            }
+                    if (params['Destroy Infrastructure'] && params.DESTROY_CONFIRMATION != 'destroy') {
+                        error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
+                    }
 
-            // Optional: Require at least one action
-            def actions = [
-                params['Infrastructure Bootstrapping'],
-                params['Infrastructure Configuration'],
-                params['Application Deployment'],
-                params['Destroy Infrastructure'],
-                params['Start Server'],
-                params['Stop running Server'],
-                params['Display Addresses']
-            ]
-            if (!actions.any { it }) {
-                error("⚠️ No action selected. Please choose at least one operation.")
+                    // Optional: Require at least one action
+                    def actions = [
+                        params['Infrastructure Bootstrapping'],
+                        params['Infrastructure Configuration'],
+                        params['Application Deployment'],
+                        params['Destroy Infrastructure'],
+                        params['Start Server'],
+                        params['Stop running Server'],
+                        params['Display Addresses']
+                    ]
+                    if (!actions.any { it }) {
+                        error("⚠️ No action selected. Please choose at least one operation.")
+                    }
+                }
             }
         }
-    }
-}
 
-
-
-
-
-
+        // New stage to display server state
+        stage('Display Server State') {
+            steps {
+                sh '''
+                    set +x
+                    export AWS_DEFAULT_REGION=${AWS_REGION}
+                    echo "=== Server State ==="
+                    
+                    echo "Master Instances:"
+                    MASTER_DATA=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=master_instance" \
+                        --query "Reservations[].Instances[].[InstanceId,State.Name]" \
+                        --output text)
+                    if [ -n "$MASTER_DATA" ]; then
+                        echo "$MASTER_DATA" | while read -r id state; do
+                            echo "  Instance ID: $id, State: $state"
+                        done
+                    else
+                        echo "  No master instances found with tag Name=master_instance"
+                    fi
+                    
+                    echo "Worker Instances:"
+                    WORKER_DATA=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=worker_instance" \
+                        --query "Reservations[].Instances[].[InstanceId,State.Name]" \
+                        --output text)
+                    if [ -n "$WORKER_DATA" ]; then
+                        echo "$WORKER_DATA" | while read -r id state; do
+                            echo "  Instance ID: $id, State: $state"
+                        done
+                    else
+                        echo "  No worker instances found with tag Name=worker_instance"
+                    fi
+                    
+                    echo "==================="
+                '''
+            }
+        }
 
         stage('Infrastructure Bootstrapping') {
             when {
@@ -90,15 +123,14 @@ pipeline {
                         ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
                             --private-key=/workspace/aws/id_rsa \
                             -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
-                           
                     """
                     
                     sh """
                         ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
                             --private-key=/workspace/aws/id_rsa \
                             -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
-                            -e \"naocloud_tag=${params.CLUSTER_VERSION}" \
-                            -e \"naogizmo_tag=${params.CLUSTER_VERSION}"
+                            -e \"naocloud_tag=${params.CLUSTER_VERSION}\" \
+                            -e \"naogizmo_tag=${params.CLUSTER_VERSION}\"
                     """
                 }
             }
@@ -112,8 +144,7 @@ pipeline {
                     sh """
                         ansible-playbook -i aws_ec2.yaml helm-playbook.yaml  \
                             --private-key=/workspace/aws/id_rsa \
-                            -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
-                           
+                            -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
                     """
                 }
             }
