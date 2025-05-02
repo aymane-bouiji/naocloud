@@ -4,7 +4,7 @@ pipeline {
         pollSCM('*/5 * * * *')
     }
     parameters {
-        activeChoice(name: 'ACTION', description: 'Select the action to perform based on server state', groovyScript: '''
+        activeChoice(name: 'ACTION', description: 'Select the action to perform based on server state', script: '''
             node {
                 def awsRegion = binding.variables.get('AWS_REGION') ?: 'eu-west-1'
                 def awsCmd = "aws ec2 describe-instances --region ${awsRegion}"
@@ -151,7 +151,7 @@ pipeline {
         stage('Stop Server') {
             when {
                 expression { params.ACTION == 'Stop running Server' }
- beskr            }
+            }
             steps {
                 sh '''
                     export AWS_DEFAULT_REGION=${AWS_REGION}
