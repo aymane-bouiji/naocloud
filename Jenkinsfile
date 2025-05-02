@@ -1,66 +1,140 @@
 pipeline {
     agent any
+    
+    options {
+        // This prevents concurrent builds which could affect parameter refresh
+        disableConcurrentBuilds()
+    }
+    
     triggers {
         pollSCM('*/5 * * * *')
     }
+    
     parameters {
-        booleanParam(name: 'Infrastructure Bootstrapping', defaultValue: false, description: 'Set up and create the cloud environment')
-        booleanParam(name: 'Infrastructure Configuration', defaultValue: false, description: 'Configure the cloud setup and manage Application images')
-        booleanParam(name: 'Application Deployment', defaultValue: false, description: 'Deploy applications to the cloud')
-        booleanParam(name: 'Destroy Infrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
-        booleanParam(name: 'Stop running Server', defaultValue: false, description: 'Pause (stop) the server')
-        booleanParam(name: 'Start Server', defaultValue: false, description: 'Start the stopped server')
-        booleanParam(name: 'Display Addresses', defaultValue: false, description: 'Display addresses of running server')
+        // Server Status Parameter - this will be used to display current status
+        string(name: 'SERVER_STATUS', defaultValue: 'CHECKING...', description: 'Current server status (auto-populated)')
+        
+        // Action Selection - primary parameter that controls visibility of others
+        choice(name: 'ACTION', choices: ['Select Action', 'Create/Manage Infrastructure', 'Manage Server', 'View Information'], description: 'Select the action you want to perform')
+        
+        // Infrastructure parameters - shown when ACTION = Create/Manage Infrastructure
+        booleanParam(name: 'INFRASTRUCTURE_BOOTSTRAPPING', defaultValue: false, description: 'Set up and create the cloud environment')
+        booleanParam(name: 'INFRASTRUCTURE_CONFIGURATION', defaultValue: false, description: 'Configure the cloud setup and manage Application images')
+        booleanParam(name: 'APPLICATION_DEPLOYMENT', defaultValue: false, description: 'Deploy applications to the cloud')
+        booleanParam(name: 'DESTROY_INFRASTRUCTURE', defaultValue: false, description: 'Delete the entire cloud environment')
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
+        
+        // Server management parameters - shown when ACTION = Manage Server
+        booleanParam(name: 'STOP_SERVER', defaultValue: false, description: 'Pause (stop) the server')
+        booleanParam(name: 'START_SERVER', defaultValue: false, description: 'Start the stopped server')
+        
+        // Information parameters - shown when ACTION = View Information
+        booleanParam(name: 'DISPLAY_ADDRESSES', defaultValue: true, description: 'Display addresses of running server')
+        
+        // Common parameters - always shown
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
         string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
     }
+    
     stages {
+        stage('Check Server State') {
+            steps {
+                script {
+                    // Store server state for later use
+                    env.SERVER_STATE = sh(script: '''
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        MASTER_COUNT=$(aws ec2 describe-instances \
+                            --filters "Name=tag:Name,Values=master_instance" \
+                            --query "length(Reservations[].Instances[])" \
+                            --output text)
+                            
+                        if [ "$MASTER_COUNT" -eq "0" ]; then
+                            echo "NOT_CREATED"
+                        else
+                            RUNNING_COUNT=$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=master_instance,worker_instance" "Name=instance-state-name,Values=running" \
+                                --query "length(Reservations[].Instances[])" \
+                                --output text)
+                            INSTANCE_COUNT=$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=master_instance,worker_instance" \
+                                --query "length(Reservations[].Instances[])" \
+                                --output text)
+                                
+                            if [ "$RUNNING_COUNT" -eq "$INSTANCE_COUNT" ]; then
+                                echo "RUNNING"
+                            elif [ "$RUNNING_COUNT" -eq "0" ]; then
+                                echo "STOPPED"
+                            else
+                                echo "PARTIAL"
+                            fi
+                        fi
+                    ''', returnStdout: true).trim()
+                    
+                    echo "Current server state: ${env.SERVER_STATE}"
+                    
+                    // Update the status parameter for the next build
+                    properties([
+                        parameters([
+                            string(name: 'SERVER_STATUS', defaultValue: env.SERVER_STATE, description: 'Current server status')
+                        ])
+                    ])
+                }
+            }
+        }
+
         stage('Parameter Validation') {
             steps {
                 script {
-                    // Contradictory actions
-                    if (params['Start Server'] && params['Stop running Server']) {
-                        error("❌ You cannot start and stop the server at the same time. Please select only one.")
+                    // Only perform checks for relevant parameters based on action
+                    if (params.ACTION == 'Create/Manage Infrastructure') {
+                        // Check destroy confirmation
+                        if (params.DESTROY_INFRASTRUCTURE && params.DESTROY_CONFIRMATION != 'destroy') {
+                            error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
+                        }
+                        
+                        // Check contradictory actions
+                        if (params.INFRASTRUCTURE_BOOTSTRAPPING && params.DESTROY_INFRASTRUCTURE) {
+                            error("❌ You cannot bootstrap and destroy infrastructure at the same time. Please select only one.")
+                        }
+                        
+                        // Check if any infrastructure action is selected
+                        if (!params.INFRASTRUCTURE_BOOTSTRAPPING && 
+                            !params.INFRASTRUCTURE_CONFIGURATION && 
+                            !params.APPLICATION_DEPLOYMENT && 
+                            !params.DESTROY_INFRASTRUCTURE) {
+                            error("⚠️ No infrastructure action selected. Please choose at least one operation.")
+                        }
                     }
-
-                    if (params['Infrastructure Bootstrapping'] && params['Destroy Infrastructure']) {
-                        error("❌ You cannot bootstrap and destroy infrastructure at the same time. Please select only one.")
+                    
+                    if (params.ACTION == 'Manage Server') {
+                        // Check contradictory server actions
+                        if (params.START_SERVER && params.STOP_SERVER) {
+                            error("❌ You cannot start and stop the server at the same time. Please select only one.")
+                        }
+                        
+                        // Check if any server action is selected
+                        if (!params.START_SERVER && !params.STOP_SERVER) {
+                            error("⚠️ No server action selected. Please choose at least one operation.")
+                        }
+                        
+                        // Verify server exists before attempting to manage it
+                        if (env.SERVER_STATE == "NOT_CREATED") {
+                            error("❌ Cannot manage server because it doesn't exist yet. Please create infrastructure first.")
+                        }
                     }
-
-                    if (params['Destroy Infrastructure'] && (
-                        params['Infrastructure Configuration'] ||
-                        params['Application Deployment'] ||
-                        params['Start Server'] ||
-                        params['Stop running Server'] ||
-                        params['Display Addresses']
-                    )) {
-                        error("❌ Cannot perform other actions while destroying infrastructure. Please deselect all except 'Destroy Infrastructure'.")
+                    
+                    if (params.ACTION == 'View Information') {
+                        // Nothing to validate here
                     }
-
-                    if (params['Destroy Infrastructure'] && params.DESTROY_CONFIRMATION != 'destroy') {
-                        error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
-                    }
-
-                    // Optional: Require at least one action
-                    def actions = [
-                        params['Infrastructure Bootstrapping'],
-                        params['Infrastructure Configuration'],
-                        params['Application Deployment'],
-                        params['Destroy Infrastructure'],
-                        params['Start Server'],
-                        params['Stop running Server'],
-                        params['Display Addresses']
-                    ]
-                    if (!actions.any { it }) {
-                        error("⚠️ No action selected. Please choose at least one operation.")
+                    
+                    if (params.ACTION == 'Select Action') {
+                        error("⚠️ Please select an action from the dropdown menu.")
                     }
                 }
             }
         }
 
-        // New stage to display server state
         stage('Display Server State') {
             steps {
                 sh '''
@@ -99,9 +173,13 @@ pipeline {
             }
         }
 
+        // Infrastructure stages - only run when ACTION = Create/Manage Infrastructure
         stage('Infrastructure Bootstrapping') {
             when {
-                expression { params['Infrastructure Bootstrapping'] }
+                allOf {
+                    expression { params.ACTION == 'Create/Manage Infrastructure' }
+                    expression { params.INFRASTRUCTURE_BOOTSTRAPPING }
+                }
             }
             steps {
                 dir("/workspace/aws") {
@@ -111,9 +189,13 @@ pipeline {
                 }
             }
         }
+        
         stage('Infrastructure Configuration') {
             when {
-                expression { params['Infrastructure Configuration'] }
+                allOf {
+                    expression { params.ACTION == 'Create/Manage Infrastructure' }
+                    expression { params.INFRASTRUCTURE_CONFIGURATION }
+                }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -135,9 +217,13 @@ pipeline {
                 }
             }
         }
+        
         stage('Application Deployment') {
             when {
-                expression { params['Application Deployment'] }
+                allOf {
+                    expression { params.ACTION == 'Create/Manage Infrastructure' }
+                    expression { params.APPLICATION_DEPLOYMENT }
+                }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -149,9 +235,29 @@ pipeline {
                 }
             }
         }
+        
+        stage('Destroy Infrastructure') {
+            when {
+                allOf {
+                    expression { params.ACTION == 'Create/Manage Infrastructure' }
+                    expression { params.DESTROY_INFRASTRUCTURE }
+                    expression { params.DESTROY_CONFIRMATION == 'destroy' }
+                }
+            }
+            steps {
+                dir("/workspace/aws") {
+                    sh 'terraform destroy -auto-approve'
+                }
+            }
+        }
+
+        // Server management stages - only run when ACTION = Manage Server
         stage('Stop Server') {
             when {
-                expression { params['Stop running Server'] }
+                allOf {
+                    expression { params.ACTION == 'Manage Server' }
+                    expression { params.STOP_SERVER }
+                }
             }
             steps {
                 sh '''
@@ -174,9 +280,13 @@ pipeline {
                 '''
             }
         }
+        
         stage('Start Server') {
             when {
-                expression { params['Start Server'] }
+                allOf {
+                    expression { params.ACTION == 'Manage Server' }
+                    expression { params.START_SERVER }
+                }
             }
             steps {
                 sh '''
@@ -199,22 +309,14 @@ pipeline {
                 '''
             }
         }
-        stage('Destroy Infrastructure') {
-            when {
-                allOf {
-                    expression { params['Destroy Infrastructure'] }
-                    expression { params.DESTROY_CONFIRMATION == 'destroy' }
-                }
-            }
-            steps {
-                dir("/workspace/aws") {
-                    sh 'terraform destroy -auto-approve'
-                }
-            }
-        }
+
+        // Information stages - only run when ACTION = View Information
         stage('Display addresses of the server') {
             when {
-                expression { params['Display Addresses'] }
+                allOf {
+                    expression { params.ACTION == 'View Information' }
+                    expression { params.DISPLAY_ADDRESSES }
+                }
             }
             steps {
                 sh '''
@@ -239,6 +341,7 @@ pipeline {
             }
         }
     }
+    
     post {
         always {
             cleanWs()
