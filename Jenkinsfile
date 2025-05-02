@@ -4,13 +4,45 @@ pipeline {
         pollSCM('*/5 * * * *')
     }
     parameters {
-        booleanParam(name: 'Infrastructure Bootstrapping', defaultValue: false, description: 'Set up and create the cloud environment')
-        booleanParam(name: 'Infrastructure Configuration', defaultValue: false, description: 'Configure the cloud setup and manage Application images')
-        booleanParam(name: 'Application Deployment', defaultValue: false, description: 'Deploy applications to the cloud')
-        booleanParam(name: 'Destroy Infrastructure', defaultValue: false, description: 'Delete the entire cloud environment')
-        booleanParam(name: 'Stop running Server', defaultValue: false, description: 'Pause (stop) the server')
-        booleanParam(name: 'Start Server', defaultValue: false, description: 'Start the stopped server')
-        booleanParam(name: 'Display Addresses', defaultValue: false, description: 'Display addresses of running server')
+        activeChoices(name: 'ACTION', description: 'Select the action to perform based on server state', script: '''
+            def awsRegion = binding.variables.get('AWS_REGION') ?: 'eu-west-1'
+            def awsCmd = "aws ec2 describe-instances --region ${awsRegion}"
+            
+            // Get master and worker instance states
+            def masterData = "${awsCmd} --filters 'Name=tag:Name,Values=master_instance' --query 'Reservations[].Instances[].State.Name' --output text".execute().text.trim()
+            def workerData = "${awsCmd} --filters 'Name=tag:Name,Values=worker_instance' --query 'Reservations[].Instances[].State.Name' --output text".execute().text.trim()
+            
+            // Collect unique states
+            def states = (masterData.tokenize() + workerData.tokenize()).unique()
+            
+            // Initialize available actions
+            def actions = []
+            
+            // Define possible actions based on state
+            if (!states || states.contains('terminated') || states.empty) {
+                // No instances or all terminated: allow bootstrapping or destroy (if resources exist)
+                actions << 'Infrastructure Bootstrapping'
+                actions << 'Destroy Infrastructure'
+            } else {
+                // Instances exist
+                actions << 'Infrastructure Configuration'
+                actions << 'Application Deployment'
+                actions << 'Display Addresses'
+                actions << 'Destroy Infrastructure'
+                
+                // Allow stop if any instance is running or pending
+                if (states.any { it in ['running', 'pending'] }) {
+                    actions << 'Stop running Server'
+                }
+                // Allow start if any instance is stopped
+                if (states.contains('stopped')) {
+                    actions << 'Start Server'
+                }
+            }
+            
+            // Return actions as a list for the dropdown
+            return actions ?: ['No valid actions available']
+        ''')
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
@@ -20,47 +52,15 @@ pipeline {
         stage('Parameter Validation') {
             steps {
                 script {
-                    // Contradictory actions
-                    if (params['Start Server'] && params['Stop running Server']) {
-                        error("❌ You cannot start and stop the server at the same time. Please select only one.")
+                    if (params.ACTION == 'No valid actions available') {
+                        error("❌ No valid actions available for the current server state.")
                     }
-
-                    if (params['Infrastructure Bootstrapping'] && params['Destroy Infrastructure']) {
-                        error("❌ You cannot bootstrap and destroy infrastructure at the same time. Please select only one.")
-                    }
-
-                    if (params['Destroy Infrastructure'] && (
-                        params['Infrastructure Configuration'] ||
-                        params['Application Deployment'] ||
-                        params['Start Server'] ||
-                        params['Stop running Server'] ||
-                        params['Display Addresses']
-                    )) {
-                        error("❌ Cannot perform other actions while destroying infrastructure. Please deselect all except 'Destroy Infrastructure'.")
-                    }
-
-                    if (params['Destroy Infrastructure'] && params.DESTROY_CONFIRMATION != 'destroy') {
+                    if (params.ACTION == 'Destroy Infrastructure' && params.DESTROY_CONFIRMATION != 'destroy') {
                         error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
-                    }
-
-                    // Optional: Require at least one action
-                    def actions = [
-                        params['Infrastructure Bootstrapping'],
-                        params['Infrastructure Configuration'],
-                        params['Application Deployment'],
-                        params['Destroy Infrastructure'],
-                        params['Start Server'],
-                        params['Stop running Server'],
-                        params['Display Addresses']
-                    ]
-                    if (!actions.any { it }) {
-                        error("⚠️ No action selected. Please choose at least one operation.")
                     }
                 }
             }
         }
-
-        // New stage to display server state
         stage('Display Server State') {
             steps {
                 sh '''
@@ -98,10 +98,9 @@ pipeline {
                 '''
             }
         }
-
         stage('Infrastructure Bootstrapping') {
             when {
-                expression { params['Infrastructure Bootstrapping'] }
+                expression { params.ACTION == 'Infrastructure Bootstrapping' }
             }
             steps {
                 dir("/workspace/aws") {
@@ -113,18 +112,16 @@ pipeline {
         }
         stage('Infrastructure Configuration') {
             when {
-                expression { params['Infrastructure Configuration'] }
+                expression { params.ACTION == 'Infrastructure Configuration' }
             }
             steps {
                 dir("/workspace/ansible") {
                     sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
-
                     sh """
                         ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
                             --private-key=/workspace/aws/id_rsa \
                             -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
                     """
-                    
                     sh """
                         ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
                             --private-key=/workspace/aws/id_rsa \
@@ -137,7 +134,7 @@ pipeline {
         }
         stage('Application Deployment') {
             when {
-                expression { params['Application Deployment'] }
+                expression { params.ACTION == 'Application Deployment' }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -151,7 +148,7 @@ pipeline {
         }
         stage('Stop Server') {
             when {
-                expression { params['Stop running Server'] }
+                expression { params.ACTION == 'Stop running Server' }
             }
             steps {
                 sh '''
@@ -176,7 +173,7 @@ pipeline {
         }
         stage('Start Server') {
             when {
-                expression { params['Start Server'] }
+                expression { params.ACTION == 'Start Server' }
             }
             steps {
                 sh '''
@@ -201,10 +198,7 @@ pipeline {
         }
         stage('Destroy Infrastructure') {
             when {
-                allOf {
-                    expression { params['Destroy Infrastructure'] }
-                    expression { params.DESTROY_CONFIRMATION == 'destroy' }
-                }
+                expression { params.ACTION == 'Destroy Infrastructure' }
             }
             steps {
                 dir("/workspace/aws") {
@@ -212,9 +206,9 @@ pipeline {
                 }
             }
         }
-        stage('Display addresses of the server') {
+        stage('Display Addresses') {
             when {
-                expression { params['Display Addresses'] }
+                expression { params.ACTION == 'Display Addresses' }
             }
             steps {
                 sh '''
