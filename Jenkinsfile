@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
     triggers {
@@ -7,42 +6,8 @@ pipeline {
     parameters {
         activeChoice(
             name: 'ACTION',
-            description: 'Select the action to perform based on server state',
-            script: '''
-                def awsRegion = binding.variables.get('AWS_REGION') ?: 'eu-west-1'
-                def awsCmd = "aws ec2 describe-instances --region ${awsRegion}"
-                
-                // Get master and worker instance states using Groovy execute()
-                def masterData = "${awsCmd} --filters 'Name=tag:Name,Values=master_instance' --query 'Reservations[].Instances[].State.Name' --output text".execute().text.trim()
-                def workerData = "${awsCmd} --filters 'Name=tag:Name,Values=worker_instance' --query 'Reservations[].Instances[].State.Name' --output text".execute().text.trim()
-                
-                // Collect unique states
-                def states = (masterData.tokenize() + workerData.tokenize()).unique()
-                
-                // Initialize available actions
-                def actions = []
-                
-                // Define possible actions based on state
-                if (!states || states.contains('terminated') || states.empty) {
-                    actions << 'Infrastructure Bootstrapping'
-                    actions << 'Destroy Infrastructure'
-                } else {
-                    actions << 'Infrastructure Configuration'
-                    actions << 'Application Deployment'
-                    actions << 'Display Addresses'
-                    actions << 'Destroy Infrastructure'
-                    
-                    if (states.any { it in ['running', 'pending'] }) {
-                        actions << 'Stop running Server'
-                    }
-                    if (states.contains('stopped')) {
-                        actions << 'Start Server'
-                    }
-                }
-                
-                // Return actions as a list for the dropdown
-                return actions ?: ['No valid actions available']
-            '''
+            description: 'Select an action based on server state',
+            script: new File('/var/jenkins_home/scripts/getActions.groovy').text
         )
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
