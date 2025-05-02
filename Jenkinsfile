@@ -20,7 +20,7 @@ pipeline {
         stage('Parameter Validation') {
     steps {
         script {
-            // Check mutually exclusive options
+            // Contradictory actions
             if (params['Start Server'] && params['Stop running Server']) {
                 error("❌ You cannot start and stop the server at the same time. Please select only one.")
             }
@@ -29,12 +29,37 @@ pipeline {
                 error("❌ You cannot bootstrap and destroy infrastructure at the same time. Please select only one.")
             }
 
+            if (params['Destroy Infrastructure'] && (
+                params['Infrastructure Configuration'] ||
+                params['Application Deployment'] ||
+                params['Start Server'] ||
+                params['Stop running Server'] ||
+                params['Display Addresses']
+            )) {
+                error("❌ Cannot perform other actions while destroying infrastructure. Please deselect all except 'Destroy Infrastructure'.")
+            }
+
             if (params['Destroy Infrastructure'] && params.DESTROY_CONFIRMATION != 'destroy') {
                 error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
+            }
+
+            // Optional: Require at least one action
+            def actions = [
+                params['Infrastructure Bootstrapping'],
+                params['Infrastructure Configuration'],
+                params['Application Deployment'],
+                params['Destroy Infrastructure'],
+                params['Start Server'],
+                params['Stop running Server'],
+                params['Display Addresses']
+            ]
+            if (!actions.any { it }) {
+                error("⚠️ No action selected. Please choose at least one operation.")
             }
         }
     }
 }
+
 
 
 
