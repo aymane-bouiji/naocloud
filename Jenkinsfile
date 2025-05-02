@@ -17,6 +17,30 @@ pipeline {
         string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
     }
     stages {
+        stage('Parameter Validation') {
+    steps {
+        script {
+            // Check mutually exclusive options
+            if (params['Start Server'] && params['Stop running Server']) {
+                error("❌ You cannot start and stop the server at the same time. Please select only one.")
+            }
+
+            if (params['Infrastructure Bootstrapping'] && params['Destroy Infrastructure']) {
+                error("❌ You cannot bootstrap and destroy infrastructure at the same time. Please select only one.")
+            }
+
+            if (params['Destroy Infrastructure'] && params.DESTROY_CONFIRMATION != 'destroy') {
+                error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
+            }
+        }
+    }
+}
+
+
+
+
+
+
         stage('Infrastructure Bootstrapping') {
             when {
                 expression { params['Infrastructure Bootstrapping'] }
