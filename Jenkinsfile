@@ -1,17 +1,20 @@
+
 pipeline {
     agent any
     triggers {
         pollSCM('*/5 * * * *')
     }
     parameters {
-        activeChoice(name: 'ACTION', description: 'Select the action to perform based on server state', script: '''
-            node {
+        activeChoice(
+            name: 'ACTION',
+            description: 'Select the action to perform based on server state',
+            script: '''
                 def awsRegion = binding.variables.get('AWS_REGION') ?: 'eu-west-1'
                 def awsCmd = "aws ec2 describe-instances --region ${awsRegion}"
                 
-                // Get master and worker instance states
-                def masterData = sh(script: "${awsCmd} --filters 'Name=tag:Name,Values=master_instance' --query 'Reservations[].Instances[].State.Name' --output text", returnStdout: true).trim()
-                def workerData = sh(script: "${awsCmd} --filters 'Name=tag:Name,Values=worker_instance' --query 'Reservations[].Instances[].State.Name' --output text", returnStdout: true).trim()
+                // Get master and worker instance states using Groovy execute()
+                def masterData = "${awsCmd} --filters 'Name=tag:Name,Values=master_instance' --query 'Reservations[].Instances[].State.Name' --output text".execute().text.trim()
+                def workerData = "${awsCmd} --filters 'Name=tag:Name,Values=worker_instance' --query 'Reservations[].Instances[].State.Name' --output text".execute().text.trim()
                 
                 // Collect unique states
                 def states = (masterData.tokenize() + workerData.tokenize()).unique()
@@ -21,21 +24,17 @@ pipeline {
                 
                 // Define possible actions based on state
                 if (!states || states.contains('terminated') || states.empty) {
-                    // No instances or all terminated: allow bootstrapping or destroy
                     actions << 'Infrastructure Bootstrapping'
                     actions << 'Destroy Infrastructure'
                 } else {
-                    // Instances exist
                     actions << 'Infrastructure Configuration'
                     actions << 'Application Deployment'
                     actions << 'Display Addresses'
                     actions << 'Destroy Infrastructure'
                     
-                    // Allow stop if any instance is running or pending
                     if (states.any { it in ['running', 'pending'] }) {
                         actions << 'Stop running Server'
                     }
-                    // Allow start if any instance is stopped
                     if (states.contains('stopped')) {
                         actions << 'Start Server'
                     }
@@ -43,8 +42,8 @@ pipeline {
                 
                 // Return actions as a list for the dropdown
                 return actions ?: ['No valid actions available']
-            }
-        ''')
+            '''
+        )
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
