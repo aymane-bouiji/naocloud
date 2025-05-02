@@ -1,8 +1,169 @@
+// This requires the Active Choices Plugin to be installed in Jenkins
+// Create a new Pipeline job and use this Jenkinsfile
+
+properties([
+    // Prevent concurrent builds
+    disableConcurrentBuilds(),
+    
+    // Configure parameters with Active Choices Plugin
+    parameters([
+        // Primary action selection parameter
+        activeChoice(
+            name: 'ACTION',
+            description: 'Select the action you want to perform',
+            script: 
+                '''
+                return ['Select Action', 'Create/Manage Infrastructure', 'Manage Server', 'View Information']
+                ''',
+            choiceType: 'SINGLE_SELECT'
+        ),
+        
+        // Server status parameter - automatically updated
+        activeChoice(
+            name: 'SERVER_STATUS',
+            description: 'Current server status (auto-populated)',
+            script: 
+                '''
+                // Get the current server status
+                def proc = "aws ec2 describe-instances --filters Name=tag:Name,Values=master_instance,worker_instance --query Reservations[].Instances[].State.Name --output text".execute()
+                proc.waitFor()
+                
+                def output = proc.text.trim()
+                if (!output) {
+                  return "NOT_CREATED"
+                } else if (output.contains("running") && !output.contains("stopped")) {
+                  return "RUNNING"
+                } else if (output.contains("stopped") && !output.contains("running")) {
+                  return "STOPPED"
+                } else {
+                  return "PARTIAL"
+                }
+                ''',
+            choiceType: 'SINGLE_SELECT',
+            referencedParameters: 'AWS_REGION'
+        ),
+        
+        // Dynamic infrastructure options based on ACTION
+        activeChoiceReactiveReference(
+            name: 'INFRASTRUCTURE_CONTROLS',
+            description: 'Infrastructure Options',
+            script:
+                '''
+                if (ACTION == 'Create/Manage Infrastructure') {
+                  return """
+                    <div style="background-color: #f0f0f0; padding: 10px; border-radius: 5px; margin-bottom: 10px;">
+                      <h3>Infrastructure Options</h3>
+                      <label style="display: block; margin-bottom: 5px;">
+                        <input type="checkbox" name="INFRASTRUCTURE_BOOTSTRAPPING"> Set up and create the cloud environment
+                      </label>
+                      <label style="display: block; margin-bottom: 5px;">
+                        <input type="checkbox" name="INFRASTRUCTURE_CONFIGURATION"> Configure the cloud setup and manage Application images
+                      </label>
+                      <label style="display: block; margin-bottom: 5px;">
+                        <input type="checkbox" name="APPLICATION_DEPLOYMENT"> Deploy applications to the cloud
+                      </label>
+                      <label style="display: block; margin-bottom: 5px;">
+                        <input type="checkbox" name="DESTROY_INFRASTRUCTURE"> Delete the entire cloud environment
+                      </label>
+                      <div id="destroy-confirmation" style="margin-top: 5px; display: none;">
+                        <label>Type "destroy" to confirm deletion:
+                          <input type="text" name="DESTROY_CONFIRMATION">
+                        </label>
+                      </div>
+                    </div>
+                    <script>
+                      document.querySelector('input[name="DESTROY_INFRASTRUCTURE"]').addEventListener('change', function() {
+                        document.getElementById('destroy-confirmation').style.display = this.checked ? 'block' : 'none';
+                      });
+                    </script>
+                  """
+                } else {
+                  return ""
+                }
+                ''',
+            referencedParameters: 'ACTION',
+            choiceType: 'FORMATTED_HTML'
+        ),
+        
+        // Dynamic server options based on ACTION and SERVER_STATUS
+        activeChoiceReactiveReference(
+            name: 'SERVER_CONTROLS',
+            description: 'Server Controls',
+            script:
+                '''
+                if (ACTION == 'Manage Server') {
+                  def disabled = (SERVER_STATUS == "NOT_CREATED") ? "disabled" : ""
+                  def startDisabled = (SERVER_STATUS == "RUNNING") ? "disabled" : ""
+                  def stopDisabled = (SERVER_STATUS == "STOPPED") ? "disabled" : ""
+                  
+                  return """
+                    <div style="background-color: #f0f0f0; padding: 10px; border-radius: 5px; margin-bottom: 10px;">
+                      <h3>Server Controls</h3>
+                      <p>Current Status: <strong>${SERVER_STATUS}</strong></p>
+                      <label style="display: block; margin-bottom: 5px;">
+                        <input type="checkbox" name="START_SERVER" ${startDisabled} ${disabled}> Start the stopped server
+                      </label>
+                      <label style="display: block; margin-bottom: 5px;">
+                        <input type="checkbox" name="STOP_SERVER" ${stopDisabled} ${disabled}> Pause (stop) the server
+                      </label>
+                      ${SERVER_STATUS == "NOT_CREATED" ? "<p style='color: red;'>You must create infrastructure first.</p>" : ""}
+                    </div>
+                  """
+                } else {
+                  return ""
+                }
+                ''',
+            referencedParameters: 'ACTION, SERVER_STATUS',
+            choiceType: 'FORMATTED_HTML'
+        ),
+        
+        // Dynamic information options based on ACTION and SERVER_STATUS
+        activeChoiceReactiveReference(
+            name: 'INFO_CONTROLS',
+            description: 'Information Options',
+            script:
+                '''
+                if (ACTION == 'View Information') {
+                  def disabled = (SERVER_STATUS == "NOT_CREATED" || SERVER_STATUS == "STOPPED") ? "disabled" : ""
+                  
+                  return """
+                    <div style="background-color: #f0f0f0; padding: 10px; border-radius: 5px; margin-bottom: 10px;">
+                      <h3>Information Options</h3>
+                      <label style="display: block; margin-bottom: 5px;">
+                        <input type="checkbox" name="DISPLAY_ADDRESSES" checked ${disabled}> Show public addresses of running servers
+                      </label>
+                      ${(SERVER_STATUS == "NOT_CREATED" || SERVER_STATUS == "STOPPED") ? "<p style='color: orange;'>Server must be running to view addresses.</p>" : ""}
+                    </div>
+                  """
+                } else {
+                  return ""
+                }
+                ''',
+            referencedParameters: 'ACTION, SERVER_STATUS',
+            choiceType: 'FORMATTED_HTML'
+        ),
+        
+        // Hidden parameters that will be set by the HTML form controls
+        booleanParam(name: 'INFRASTRUCTURE_BOOTSTRAPPING', defaultValue: false, description: ''),
+        booleanParam(name: 'INFRASTRUCTURE_CONFIGURATION', defaultValue: false, description: ''),
+        booleanParam(name: 'APPLICATION_DEPLOYMENT', defaultValue: false, description: ''),
+        booleanParam(name: 'DESTROY_INFRASTRUCTURE', defaultValue: false, description: ''),
+        string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: ''),
+        booleanParam(name: 'START_SERVER', defaultValue: false, description: ''),
+        booleanParam(name: 'STOP_SERVER', defaultValue: false, description: ''),
+        booleanParam(name: 'DISPLAY_ADDRESSES', defaultValue: true, description: ''),
+        
+        // Common parameters always visible
+        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)'),
+        choice(name: 'LOG_LEVEL', choices: ['INFO', 'DEBUG'], description: 'Log detail level - INFO or DEBUG'),
+        string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
+    ])
+])
+
 pipeline {
     agent any
     
     options {
-        // This prevents concurrent builds which could affect parameter refresh
         disableConcurrentBuilds()
     }
     
@@ -10,75 +171,25 @@ pipeline {
         pollSCM('*/5 * * * *')
     }
     
-    parameters {
-        // Server Status Parameter - this will be used to display current status
-        string(name: 'SERVER_STATUS', defaultValue: 'CHECKING...', description: 'Current server status (auto-populated)')
-        
-        // Action Selection - primary parameter that controls visibility of others
-        choice(name: 'ACTION', choices: ['Select Action', 'Create/Manage Infrastructure', 'Manage Server', 'View Information'], description: 'Select the action you want to perform')
-        
-        // Infrastructure parameters - shown when ACTION = Create/Manage Infrastructure
-        booleanParam(name: 'INFRASTRUCTURE_BOOTSTRAPPING', defaultValue: false, description: 'Set up and create the cloud environment')
-        booleanParam(name: 'INFRASTRUCTURE_CONFIGURATION', defaultValue: false, description: 'Configure the cloud setup and manage Application images')
-        booleanParam(name: 'APPLICATION_DEPLOYMENT', defaultValue: false, description: 'Deploy applications to the cloud')
-        booleanParam(name: 'DESTROY_INFRASTRUCTURE', defaultValue: false, description: 'Delete the entire cloud environment')
-        string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
-        
-        // Server management parameters - shown when ACTION = Manage Server
-        booleanParam(name: 'STOP_SERVER', defaultValue: false, description: 'Pause (stop) the server')
-        booleanParam(name: 'START_SERVER', defaultValue: false, description: 'Start the stopped server')
-        
-        // Information parameters - shown when ACTION = View Information
-        booleanParam(name: 'DISPLAY_ADDRESSES', defaultValue: true, description: 'Display addresses of running server')
-        
-        // Common parameters - always shown
-        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
-        string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
-        string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
-    }
-    
     stages {
-        stage('Check Server State') {
+        stage('Display Instructions') {
             steps {
                 script {
-                    // Store server state for later use
-                    env.SERVER_STATE = sh(script: '''
-                        export AWS_DEFAULT_REGION=${AWS_REGION}
-                        MASTER_COUNT=$(aws ec2 describe-instances \
-                            --filters "Name=tag:Name,Values=master_instance" \
-                            --query "length(Reservations[].Instances[])" \
-                            --output text)
-                            
-                        if [ "$MASTER_COUNT" -eq "0" ]; then
-                            echo "NOT_CREATED"
-                        else
-                            RUNNING_COUNT=$(aws ec2 describe-instances \
-                                --filters "Name=tag:Name,Values=master_instance,worker_instance" "Name=instance-state-name,Values=running" \
-                                --query "length(Reservations[].Instances[])" \
-                                --output text)
-                            INSTANCE_COUNT=$(aws ec2 describe-instances \
-                                --filters "Name=tag:Name,Values=master_instance,worker_instance" \
-                                --query "length(Reservations[].Instances[])" \
-                                --output text)
-                                
-                            if [ "$RUNNING_COUNT" -eq "$INSTANCE_COUNT" ]; then
-                                echo "RUNNING"
-                            elif [ "$RUNNING_COUNT" -eq "0" ]; then
-                                echo "STOPPED"
-                            else
-                                echo "PARTIAL"
-                            fi
-                        fi
-                    ''', returnStdout: true).trim()
+                    // Display helpful information about the current status and available actions
+                    echo """
+                    ============================================================
+                    JENKINS CLOUD MANAGEMENT PANEL
+                    ============================================================
                     
-                    echo "Current server state: ${env.SERVER_STATE}"
+                    HOW TO USE THIS PIPELINE:
+                    1. Select an ACTION from the dropdown
+                    2. Check the appropriate options based on your needs
+                    3. Click "Build" to execute the selected actions
                     
-                    // Update the status parameter for the next build
-                    properties([
-                        parameters([
-                            string(name: 'SERVER_STATUS', defaultValue: env.SERVER_STATE, description: 'Current server status')
-                        ])
-                    ])
+                    Current Selection: ${params.ACTION}
+                    Current Server Status: ${params.SERVER_STATUS}
+                    ============================================================
+                    """
                 }
             }
         }
@@ -119,13 +230,25 @@ pipeline {
                         }
                         
                         // Verify server exists before attempting to manage it
-                        if (env.SERVER_STATE == "NOT_CREATED") {
+                        if (params.SERVER_STATUS == "NOT_CREATED") {
                             error("❌ Cannot manage server because it doesn't exist yet. Please create infrastructure first.")
+                        }
+                        
+                        // Additional validations for specific states
+                        if (params.START_SERVER && params.SERVER_STATUS == "RUNNING") {
+                            error("❌ Cannot start server because it is already running.")
+                        }
+                        
+                        if (params.STOP_SERVER && params.SERVER_STATUS == "STOPPED") {
+                            error("❌ Cannot stop server because it is already stopped.")
                         }
                     }
                     
                     if (params.ACTION == 'View Information') {
-                        // Nothing to validate here
+                        // Verify server is running before attempting to display addresses
+                        if (params.DISPLAY_ADDRESSES && (params.SERVER_STATUS == "NOT_CREATED" || params.SERVER_STATUS == "STOPPED")) {
+                            error("❌ Cannot display addresses because the server is not running.")
+                        }
                     }
                     
                     if (params.ACTION == 'Select Action') {
@@ -183,9 +306,21 @@ pipeline {
             }
             steps {
                 dir("/workspace/aws") {
-                    sh 'terraform init'
-                    sh 'terraform plan -out=tfplan'
-                    sh 'terraform apply -auto-approve tfplan'
+                    sh '''
+                        echo "Starting infrastructure bootstrapping process..."
+                        echo "AWS Region: ${AWS_REGION}"
+                        echo "Log Level: ${LOG_LEVEL}"
+                        
+                        if [ "${LOG_LEVEL}" = "DEBUG" ]; then
+                            set -x  # Enable bash debug mode
+                        fi
+                        
+                        terraform init
+                        terraform plan -out=tfplan
+                        terraform apply -auto-approve tfplan
+                        
+                        echo "Infrastructure bootstrapping completed successfully."
+                    '''
                 }
             }
         }
@@ -199,21 +334,29 @@ pipeline {
             }
             steps {
                 dir("/workspace/ansible") {
-                    sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
+                    sh '''
+                        echo "Starting infrastructure configuration process..."
+                        echo "AWS Region: ${AWS_REGION}"
+                        echo "Log Level: ${LOG_LEVEL}"
+                        
+                        if [ "${LOG_LEVEL}" = "DEBUG" ]; then
+                            set -x  # Enable bash debug mode
+                        fi
+                        
+                        AWS_REGION=${AWS_REGION} ansible-inventory -i aws_ec2.yaml --list
 
-                    sh """
                         ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
                             --private-key=/workspace/aws/id_rsa \
-                            -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
-                    """
-                    
-                    sh """
+                            -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" 
+                        
                         ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
                             --private-key=/workspace/aws/id_rsa \
-                            -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
-                            -e \"naocloud_tag=${params.CLUSTER_VERSION}\" \
-                            -e \"naogizmo_tag=${params.CLUSTER_VERSION}\"
-                    """
+                            -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" \
+                            -e "naocloud_tag=${CLUSTER_VERSION}" \
+                            -e "naogizmo_tag=${CLUSTER_VERSION}"
+                            
+                        echo "Infrastructure configuration completed successfully."
+                    '''
                 }
             }
         }
@@ -227,11 +370,22 @@ pipeline {
             }
             steps {
                 dir("/workspace/ansible") {
-                    sh """
+                    sh '''
+                        echo "Starting application deployment process..."
+                        echo "AWS Region: ${AWS_REGION}"
+                        echo "Log Level: ${LOG_LEVEL}"
+                        echo "Cluster Version: ${CLUSTER_VERSION}"
+                        
+                        if [ "${LOG_LEVEL}" = "DEBUG" ]; then
+                            set -x  # Enable bash debug mode
+                        fi
+                        
                         ansible-playbook -i aws_ec2.yaml helm-playbook.yaml  \
                             --private-key=/workspace/aws/id_rsa \
-                            -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
-                    """
+                            -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" 
+                            
+                        echo "Application deployment completed successfully."
+                    '''
                 }
             }
         }
@@ -246,7 +400,19 @@ pipeline {
             }
             steps {
                 dir("/workspace/aws") {
-                    sh 'terraform destroy -auto-approve'
+                    sh '''
+                        echo "Starting infrastructure destruction process..."
+                        echo "AWS Region: ${AWS_REGION}"
+                        echo "Log Level: ${LOG_LEVEL}"
+                        
+                        if [ "${LOG_LEVEL}" = "DEBUG" ]; then
+                            set -x  # Enable bash debug mode
+                        fi
+                        
+                        terraform destroy -auto-approve
+                        
+                        echo "Infrastructure destroyed successfully."
+                    '''
                 }
             }
         }
@@ -261,6 +427,14 @@ pipeline {
             }
             steps {
                 sh '''
+                    echo "Stopping server instances..."
+                    echo "AWS Region: ${AWS_REGION}"
+                    echo "Log Level: ${LOG_LEVEL}"
+                    
+                    if [ "${LOG_LEVEL}" = "DEBUG" ]; then
+                        set -x  # Enable bash debug mode
+                    fi
+                    
                     export AWS_DEFAULT_REGION=${AWS_REGION}
                     MASTER_IDS=$(aws ec2 describe-instances \
                         --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=running,pending" \
@@ -274,6 +448,7 @@ pipeline {
                     if [ -n "$INSTANCE_IDS" ]; then
                         echo "Stopping instances: $INSTANCE_IDS"
                         aws ec2 stop-instances --instance-ids $INSTANCE_IDS
+                        echo "Stop command issued successfully."
                     else
                         echo "No running instances found with tags Name=master_instance or Name=worker_instance"
                     fi
@@ -290,6 +465,14 @@ pipeline {
             }
             steps {
                 sh '''
+                    echo "Starting server instances..."
+                    echo "AWS Region: ${AWS_REGION}"
+                    echo "Log Level: ${LOG_LEVEL}"
+                    
+                    if [ "${LOG_LEVEL}" = "DEBUG" ]; then
+                        set -x  # Enable bash debug mode
+                    fi
+                    
                     export AWS_DEFAULT_REGION=${AWS_REGION}
                     MASTER_IDS=$(aws ec2 describe-instances \
                         --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=stopped" \
@@ -303,6 +486,7 @@ pipeline {
                     if [ -n "$INSTANCE_IDS" ]; then
                         echo "Starting instances: $INSTANCE_IDS"
                         aws ec2 start-instances --instance-ids $INSTANCE_IDS
+                        echo "Start command issued successfully."
                     else
                         echo "No stopped instances found with tags Name=master_instance or Name=worker_instance"
                     fi
@@ -322,20 +506,45 @@ pipeline {
                 sh '''
                     set +x
                     export AWS_DEFAULT_REGION=${AWS_REGION}
-                    echo "=== Worker Instance Public Addresses ==="
+                    echo "=== Server Information ==="
+                    echo "AWS Region: ${AWS_REGION}"
+                    
+                    echo "Master Instance Details:"
+                    MASTER_DATA=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=running,pending" \
+                        --query "Reservations[].Instances[].[InstanceId,PublicIpAddress,PublicDnsName,PrivateIpAddress]" \
+                        --output text)
+                    if [ -n "$MASTER_DATA" ]; then
+                        i=0
+                        echo "$MASTER_DATA" | while read -r id pub_ip pub_dns priv_ip; do
+                            echo "Master $((i+=1)):"
+                            echo "  Instance ID: $id"
+                            echo "  Public IP: $pub_ip"
+                            echo "  Public DNS: $pub_dns"
+                            echo "  Private IP: $priv_ip"
+                        done
+                    else
+                        echo "No running master instances found with tag Name=master_instance"
+                    fi
+                    
+                    echo "Worker Instance Details:"
                     WORKER_DATA=$(aws ec2 describe-instances \
                         --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
-                        --query "Reservations[].Instances[].[PublicIpAddress,PublicDnsName]" \
+                        --query "Reservations[].Instances[].[InstanceId,PublicIpAddress,PublicDnsName,PrivateIpAddress]" \
                         --output text)
                     if [ -n "$WORKER_DATA" ]; then
-                        echo "$WORKER_DATA" | while read -r ip dns; do
+                        i=0
+                        echo "$WORKER_DATA" | while read -r id pub_ip pub_dns priv_ip; do
                             echo "Worker $((i+=1)):"
-                            echo "  Public IP: $ip"
-                            echo "  Public DNS: $dns"
+                            echo "  Instance ID: $id"
+                            echo "  Public IP: $pub_ip"
+                            echo "  Public DNS: $pub_dns"
+                            echo "  Private IP: $priv_ip"
                         done
                     else
                         echo "No running worker instances found with tag Name=worker_instance"
                     fi
+                    
                     echo "======================================"
                 '''
             }
@@ -345,6 +554,25 @@ pipeline {
     post {
         always {
             cleanWs()
+        }
+        success {
+            echo """
+            ============================================================
+            ✅ PIPELINE EXECUTION COMPLETED SUCCESSFULLY
+            
+            Action Performed: ${params.ACTION}
+            ============================================================
+            """
+        }
+        failure {
+            echo """
+            ============================================================
+            ❌ PIPELINE EXECUTION FAILED
+            
+            Action Attempted: ${params.ACTION}
+            Please check the logs above for details on what went wrong.
+            ============================================================
+            """
         }
     }
 }
