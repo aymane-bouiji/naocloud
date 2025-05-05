@@ -25,15 +25,21 @@ pipeline {
                             MASTER_DATA=\\$(aws ec2 describe-instances \\
                                 --filters "Name=tag:Name,Values=master_instance" \\
                                 --query "Reservations[].Instances[].State.Name" \\
-                                --output text 2>/dev/null || echo "")
+                                --output text 2> /tmp/aws_error.log || echo "")
+                            if [ -s /tmp/aws_error.log ]; then
+                                echo "DEBUG: AWS CLI error (master): \\$(cat /tmp/aws_error.log)" >&2
+                            fi
                             
                             # Check worker instances
                             WORKER_DATA=\\$(aws ec2 describe-instances \\
                                 --filters "Name=tag:Name,Values=worker_instance" \\
                                 --query "Reservations[].Instances[].State.Name" \\
-                                --output text 2>/dev/null || echo "")
+                                --output text 2> /tmp/aws_error.log || echo "")
+                            if [ -s /tmp/aws_error.log ]; then
+                                echo "DEBUG: AWS CLI error (worker): \\$(cat /tmp/aws_error.log)" >&2
+                            fi
                             
-                            # Debug output (logged to console)
+                            # Log states for debugging
                             echo "DEBUG: Master instance states: \\$MASTER_DATA" >&2
                             echo "DEBUG: Worker instance states: \\$WORKER_DATA" >&2
                             
@@ -42,51 +48,58 @@ pipeline {
                             has_running=false
                             has_stopped=false
                             
-                            # Process all states
-                            for state in \\$MASTER_DATA \\$WORKER_DATA; do
-                                if [ -n "\\$state" ]; then
-                                    has_instances=true
+                            # Combine and process states
+                            ALL_STATES="\\$MASTER_DATA \\$WORKER_DATA"
+                            if [ -n "\\$ALL_STATES" ] && [ "\\$ALL_STATES" != " " ]; then
+                                has_instances=true
+                                for state in \\$ALL_STATES; do
                                     case "\\$state" in
-                                        "running"|"pending")
+                                        running|pending)
                                             has_running=true
                                             ;;
-                                        "stopped")
+                                        stopped)
                                             has_stopped=true
                                             ;;
                                     esac
-                                fi
-                            done
+                                done
+                            fi
                             
-                            # Debug flag values
+                            # Log flag values
                             echo "DEBUG: has_instances=\\$has_instances" >&2
                             echo "DEBUG: has_running=\\$has_running" >&2
                             echo "DEBUG: has_stopped=\\$has_stopped" >&2
                             
-                            # Determine available actions
+                            # Generate actions
                             actions=()
                             if [ "\\$has_instances" = "false" ]; then
                                 actions+=("Infrastructure Bootstrapping")
+                                echo "DEBUG: Added action: Infrastructure Bootstrapping" >&2
                             fi
                             if [ "\\$has_running" = "true" ]; then
                                 actions+=("Infrastructure Configuration")
                                 actions+=("Application Deployment")
                                 actions+=("Stop running Server")
                                 actions+=("Display Addresses")
+                                echo "DEBUG: Added actions for running instances" >&2
                             fi
                             if [ "\\$has_stopped" = "true" ]; then
                                 actions+=("Start Server")
+                                echo "DEBUG: Added action: Start Server" >&2
                             fi
                             if [ "\\$has_instances" = "true" ]; then
                                 actions+=("Destroy Infrastructure")
+                                echo "DEBUG: Added action: Destroy Infrastructure" >&2
                             fi
                             
-                            # Output actions, one per line
+                            # Output actions
                             if [ \\${#actions[@]} -eq 0 ]; then
                                 echo "No valid actions available"
+                                echo "DEBUG: No actions generated, returning fallback" >&2
                             else
                                 for action in "\\${actions[@]}"; do
                                     echo "\\$action"
                                 done
+                                echo "DEBUG: Generated actions: \\${actions[*]}" >&2
                             fi
                         """
                         
@@ -97,7 +110,7 @@ pipeline {
                         process.consumeProcessOutput(stdout, stderr)
                         process.waitForOrKill(10000) // Timeout after 10 seconds
                         
-                        // Log debug output to console
+                        // Log debug output
                         if (stderr) {
                             println "DEBUG: Shell script stderr: ${stderr}"
                         }
@@ -105,8 +118,13 @@ pipeline {
                         // Parse stdout into a list of actions
                         def actions = stdout.toString().trim().split('\\\\n').findAll { it }
                         
-                        // Return actions or fallback
-                        return actions ?: ['No valid actions available']
+                        // Ensure non-empty return
+                        if (!actions) {
+                            println "DEBUG: Actions list is empty, returning fallback"
+                            return ['No valid actions available']
+                        }
+                        println "DEBUG: Final actions: ${actions}"
+                        return actions
                     '''
                 ]
             ]
