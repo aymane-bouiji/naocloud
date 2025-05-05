@@ -5,175 +5,8 @@ pipeline {
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
         string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
-        activeChoice(
-            name: 'ACTION',
-            description: 'Select an action to perform',
-            filterable: false,
-            choiceType: 'PT_SINGLE_SELECT',
-            script: [
-                $class: 'GroovyScript',
-                script: [
-                    classpath: [],
-                    sandbox: true,
-                    script: '''
-                        def debugMessages = []
-                        debugMessages.add("DEBUG: Starting activeChoice script")
-                        
-                        try {
-                            def awsRegion = binding.hasVariable('AWS_REGION') ? binding.variables.get('AWS_REGION') : 'eu-west-1'
-                            debugMessages.add("DEBUG: Using AWS_REGION: ${awsRegion}")
-                            
-                            // Default states (neutral to avoid incorrect bootstrapping)
-                            def has_instances = true
-                            def has_running = false
-                            def has_stopped = false
-                            
-                            // Try AWS CLI via awsStep (Pipeline: AWS Steps plugin)
-                            try {
-                                // Check if awsStep is available
-                                def awsStepAvailable = Jenkins.instance.pluginManager.getPlugin('pipeline-aws') != null
-                                debugMessages.add("DEBUG: awsStep plugin available: ${awsStepAvailable}")
-                                
-                                if (awsStepAvailable) {
-                                    def masterResult = awsStep(
-                                        step: 'ec2DescribeInstances',
-                                        region: awsRegion,
-                                        filters: [[name: 'tag:Name', values: ['master_instance']]],
-                                        query: 'Reservations[].Instances[].{State:State.Name}'
-                                    )
-                                    def workerResult = awsStep(
-                                        step: 'ec2DescribeInstances',
-                                        region: awsRegion,
-                                        filters: [[name: 'tag:Name', values: ['worker_instance']]],
-                                        query: 'Reservations[].Instances[].{State:State.Name}'
-                                    )
-                                    
-                                    def masterStates = masterResult.collect { it.State }.join(' ')
-                                    def workerStates = workerResult.collect { it.State }.join(' ')
-                                    
-                                    debugMessages.add("DEBUG: Master instance states (awsStep): ${masterStates}")
-                                    debugMessages.add("DEBUG: Worker instance states (awsStep): ${workerStates}")
-                                    
-                                    def allStates = "${masterStates} ${workerStates}".trim()
-                                    if (allStates) {
-                                        has_instances = true
-                                        allStates.split().each { state ->
-                                            if (state == 'running' || state == 'pending') {
-                                                has_running = true
-                                            } else if (state == 'stopped') {
-                                                has_stopped = true
-                                            }
-                                        }
-                                    } else {
-                                        has_instances = false
-                                    }
-                                } else {
-                                    // Fallback to sh step
-                                    debugMessages.add("DEBUG: Falling back to sh step for AWS CLI")
-                                    def masterCmd = """
-                                        export AWS_DEFAULT_REGION=${awsRegion}
-                                        aws ec2 describe-instances \
-                                            --filters "Name=tag:Name,Values=master_instance" \
-                                            --query "Reservations[].Instances[].State.Name" \
-                                            --output text
-                                    """
-                                    def workerCmd = """
-                                        export AWS_DEFAULT_REGION=${awsRegion}
-                                        aws ec2 describe-instances \
-                                            --filters "Name=tag:Name,Values=worker_instance" \
-                                            --query "Reservations[].Instances[].State.Name" \
-                                            --output text
-                                    """
-                                    
-                                    def masterData = sh(script: masterCmd, returnStdout: true).trim()
-                                    def workerData = sh(script: workerCmd, returnStdout: true).trim()
-                                    
-                                    debugMessages.add("DEBUG: Master instance states (sh): ${masterData}")
-                                    debugMessages.add("DEBUG: Worker instance states (sh): ${workerData}")
-                                    
-                                    def allStates = "${masterData} ${workerData}".trim()
-                                    if (allStates) {
-                                        has_instances = true
-                                        allStates.split().each { state ->
-                                            if (state == 'running' || state == 'pending') {
-                                                has_running = true
-                                            } else if (state == 'stopped') {
-                                                has_stopped = true
-                                            }
-                                        }
-                                    } else {
-                                        has_instances = false
-                                    }
-                                }
-                            } catch (Exception e) {
-                                debugMessages.add("ERROR: AWS CLI command failed: ${e.message}")
-                            }
-                            
-                            debugMessages.add("DEBUG: has_instances=${has_instances}")
-                            debugMessages.add("DEBUG: has_running=${has_running}")
-                            debugMessages.add("DEBUG: has_stopped=${has_stopped}")
-                            
-                            // Generate actions
-                            def actions = []
-                            if (!has_instances) {
-                                actions.add("Infrastructure Bootstrapping")
-                                debugMessages.add("DEBUG: Added action: Infrastructure Bootstrapping")
-                            }
-                            if (has_running) {
-                                actions.add("Infrastructure Configuration")
-                                actions.add("Application Deployment")
-                                actions.add("Stop running Server")
-                                actions.add("Display Addresses")
-                                debugMessages.add("DEBUG: Added actions for running instances")
-                            }
-                            if (has_stopped) {
-                                actions.add("Start Server")
-                                debugMessages.add("DEBUG: Added action: Start Server")
-                            }
-                            if (has_instances) {
-                                actions.add("Destroy Infrastructure")
-                                debugMessages.add("DEBUG: Added action: Destroy Infrastructure")
-                            }
-                            
-                            // Return actions or fallback
-                            if (actions.isEmpty()) {
-                                debugMessages.add("DEBUG: No actions generated, returning fallback")
-                                actions.add("No valid actions available")
-                            }
-                            
-                            debugMessages.add("DEBUG: Final actions: ${actions}")
-                            
-                            // Persist debug logs
-                            try {
-                                new File('/var/jenkins_home/workspace/naoserver/active_choice_debug.log').text = debugMessages.join('\\n')
-                            } catch (Exception e) {
-                                debugMessages.add("DEBUG: Failed to write debug log: ${e.message}")
-                            }
-                            
-                            // Return debug messages if LOG_LEVEL is DEBUG
-                            if (binding.hasVariable('LOG_LEVEL') && binding.variables.get('LOG_LEVEL') == 'DEBUG') {
-                                return debugMessages + actions
-                            }
-                            return actions
-                        } catch (Exception e) {
-                            debugMessages.add("ERROR: Script failed: ${e.message}")
-                            try {
-                                new File('/var/jenkins_home/workspace/naoserver/active_choice_debug.log').text = debugMessages.join('\\n')
-                            } catch (Exception ignored) {}
-                            if (binding.hasVariable('LOG_LEVEL') && binding.variables.get('LOG_LEVEL') == 'DEBUG') {
-                                return debugMessages + ["Error: Script execution failed"]
-                            }
-                            return ["Error: Script execution failed"]
-                        }
-                    '''
-                ]
-            ]
-        )
-        string(
-            name: 'DESTROY_CONFIRMATION',
-            defaultValue: '',
-            description: 'Type "destroy" to confirm deletion of the cloud environment (only required for Destroy Infrastructure)'
-        )
+        // Hidden property that will be used to rebuild the job with current state
+        string(name: 'SERVER_STATE', defaultValue: '', description: 'Hidden property for server state tracking')
     }
     
     stages {
@@ -188,11 +21,11 @@ pipeline {
                     MASTER_DATA=$(aws ec2 describe-instances \
                         --filters "Name=tag:Name,Values=master_instance" \
                         --query "Reservations[].Instances[].[InstanceId,State.Name]" \
-                        --output text 2>/tmp/aws_error.log)
+                        --output text 2>/tmp/aws_error.log || echo "")
                     WORKER_DATA=$(aws ec2 describe-instances \
                         --filters "Name=tag:Name,Values=worker_instance" \
                         --query "Reservations[].Instances[].[InstanceId,State.Name]" \
-                        --output text 2>/tmp/aws_error.log)
+                        --output text 2>/tmp/aws_error.log || echo "")
                     
                     # Log any AWS CLI errors
                     if [ -s /tmp/aws_error.log ]; then
@@ -217,6 +50,99 @@ pipeline {
                     
                     echo "=== Instance States Saved ==="
                 '''
+                
+                script {
+                    def props = readProperties file: 'instance_states.properties'
+                    env.HAS_INSTANCES = props.HAS_INSTANCES
+                    env.HAS_RUNNING = props.HAS_RUNNING
+                    env.HAS_STOPPED = props.HAS_STOPPED
+                    
+                    // Generate available actions based on actual infrastructure state
+                    def availableActions = []
+                    
+                    if (env.HAS_INSTANCES == 'false') {
+                        availableActions.add("Infrastructure Bootstrapping")
+                    }
+                    if (env.HAS_RUNNING == 'true') {
+                        availableActions.add("Infrastructure Configuration")
+                        availableActions.add("Application Deployment")
+                        availableActions.add("Stop running Server")
+                        availableActions.add("Display Addresses")
+                    }
+                    if (env.HAS_STOPPED == 'true') {
+                        availableActions.add("Start Server")
+                    }
+                    if (env.HAS_INSTANCES == 'true') {
+                        availableActions.add("Destroy Infrastructure")
+                    }
+                    
+                    // If no actions determined, provide a fallback
+                    if (availableActions.isEmpty()) {
+                        availableActions.add("No valid actions available")
+                    }
+                    
+                    // Store the current state and available actions
+                    env.SERVER_STATE_CURRENT = "has_instances=${env.HAS_INSTANCES},has_running=${env.HAS_RUNNING},has_stopped=${env.HAS_STOPPED}"
+                    env.AVAILABLE_ACTIONS = availableActions.join(',')
+                    
+                    echo "Current server state: ${env.SERVER_STATE_CURRENT}"
+                    echo "Available actions: ${env.AVAILABLE_ACTIONS}"
+                    
+                    // Check if the job was rebuilt with accurate state
+                    if (params.SERVER_STATE != env.SERVER_STATE_CURRENT) {
+                        // First run or state changed, rebuild with current state
+                        echo "Server state changed or first run detected. Rebuilding job with updated state..."
+                        
+                        // Build the action parameter for the new build
+                        def actionParam = '''
+                            <input type="choice" name="ACTION" description="Select an action to perform">
+                        '''
+                        availableActions.each { action ->
+                            actionParam += "<option value=\"${action}\">${action}</option>"
+                        }
+                        actionParam += '</input>'
+                        
+                        // Add destroy confirmation parameter conditionally
+                        def destroyParam = ''
+                        if (availableActions.contains("Destroy Infrastructure")) {
+                            destroyParam = '''
+                                <input type="string" name="DESTROY_CONFIRMATION" default="" 
+                                description="Type &quot;destroy&quot; to confirm deletion of the cloud environment (only required for Destroy Infrastructure)">
+                                </input>
+                            '''
+                        }
+                        
+                        // Rebuild with current parameters plus accurate state
+                        build job: env.JOB_NAME, parameters: [
+                            string(name: 'AWS_REGION', value: params.AWS_REGION),
+                            string(name: 'LOG_LEVEL', value: params.LOG_LEVEL),
+                            string(name: 'CLUSTER_VERSION', value: params.CLUSTER_VERSION),
+                            string(name: 'SERVER_STATE', value: env.SERVER_STATE_CURRENT),
+                            text(name: 'ACTION_CHOICES', value: actionParam),
+                            text(name: 'DESTROY_PARAM', value: destroyParam)
+                        ], wait: false
+                        
+                        // Abort the current build
+                        currentBuild.result = 'ABORTED'
+                        error("Rebuilding job with updated state...")
+                    } else {
+                        echo "Server state unchanged. Continuing with execution..."
+                        
+                        // Dynamically create ACTION parameter
+                        if (!params.ACTION) {
+                            echo "ACTION parameter not set. Please select an action from the available options."
+                            currentBuild.result = 'ABORTED'
+                            error("ACTION parameter not set")
+                        }
+                        
+                        // Check if the selected action is valid
+                        if (!env.AVAILABLE_ACTIONS.split(',').contains(params.ACTION)) {
+                            echo "Selected action '${params.ACTION}' is not currently valid. Available actions: ${env.AVAILABLE_ACTIONS}"
+                            currentBuild.result = 'ABORTED'
+                            error("Invalid action selected")
+                        }
+                    }
+                }
             }
         }
         
@@ -253,54 +179,14 @@ pipeline {
                         echo "  No worker instances found with tag Name=worker_instance"
                     fi
                     
-                    # Capture server state information for later use
-                    echo "Setting environment variables based on server state..."
-                    
-                    # Determine if there are any instances
-                    if [ -n "$MASTER_DATA" ] || [ -n "$WORKER_DATA" ]; then
-                        echo "HAS_INSTANCES=true" > server_state.properties
-                    else
-                        echo "HAS_INSTANCES=false" > server_state.properties
-                    fi
-                    
-                    # Determine if there are running instances
-                    if echo "$MASTER_DATA" | grep -q "running" || echo "$WORKER_DATA" | grep -q "running"; then
-                        echo "HAS_RUNNING=true" >> server_state.properties
-                    else
-                        echo "HAS_RUNNING=false" >> server_state.properties
-                    fi
-                    
-                    # Determine if there are stopped instances
-                    if echo "$MASTER_DATA" | grep -q "stopped" || echo "$WORKER_DATA" | grep -q "stopped"; then
-                        echo "HAS_STOPPED=true" >> server_state.properties
-                    else
-                        echo "HAS_STOPPED=false" >> server_state.properties
-                    fi
-                    
                     echo "==================="
                 '''
                 
                 script {
-                    def props = readProperties file: 'server_state.properties'
-                    env.HAS_INSTANCES = props.HAS_INSTANCES
-                    env.HAS_RUNNING = props.HAS_RUNNING
-                    env.HAS_STOPPED = props.HAS_STOPPED
-                    
-                    echo "Recommended actions based on current state:"
-                    if (env.HAS_INSTANCES == 'false') {
-                        echo "- Infrastructure Bootstrapping (create new infrastructure)"
-                    }
-                    if (env.HAS_RUNNING == 'true') {
-                        echo "- Infrastructure Configuration (configure existing infrastructure)"
-                        echo "- Application Deployment (deploy applications)"
-                        echo "- Stop running Server (stop instances)"
-                        echo "- Display Addresses (show public addresses)"
-                    }
-                    if (env.HAS_STOPPED == 'true') {
-                        echo "- Start Server (restart instances)"
-                    }
-                    if (env.HAS_INSTANCES == 'true') {
-                        echo "- Destroy Infrastructure (remove all resources)"
+                    echo "Selected action: ${params.ACTION}"
+                    echo "Available actions based on current state:"
+                    env.AVAILABLE_ACTIONS.split(',').each { action ->
+                        echo "- ${action}"
                     }
                 }
             }
@@ -466,15 +352,23 @@ pipeline {
                 switch(params.ACTION) {
                     case 'Infrastructure Bootstrapping':
                         echo "✅ Infrastructure created successfully! Next steps:"
-                        echo "1. Run again with ACTION = 'Infrastructure Configuration'"
-                        echo "2. Then run with ACTION = 'Application Deployment'"
+                        echo "1. Run again to get updated action options based on new state"
                         break
                     case 'Start Server':
                         echo "✅ Server started successfully! Next steps:"
-                        echo "1. Run with ACTION = 'Infrastructure Configuration' if needed"
-                        echo "2. Run with ACTION = 'Application Deployment' if needed"
-                        echo "3. View server addresses with ACTION = 'Display Addresses'"
+                        echo "1. Run again to get updated action options based on new state"
                         break
+                    case 'Stop running Server':
+                        echo "✅ Server stopped successfully! Next steps:"
+                        echo "1. Run again to get updated action options based on new state"
+                        break
+                    case 'Destroy Infrastructure':
+                        echo "✅ Infrastructure destroyed successfully! Next steps:"
+                        echo "1. Run again to get updated action options based on new state"
+                        break
+                    default:
+                        echo "✅ Action '${params.ACTION}' completed successfully"
+                        echo "Run again to get updated actions based on current state"
                 }
             }
         }
