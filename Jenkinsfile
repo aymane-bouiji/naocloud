@@ -1,21 +1,93 @@
 pipeline {
-    agent any
-    
-    triggers {
-        pollSCM('*/5 * * * *')
-    }
+   agent any
     
     parameters {
+        // Static parameters
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
         string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
         
         // Dynamic parameter using Active Choices
-        choice(
+        // This will call a Groovy script that checks EC2 instance state and returns appropriate actions
+        activeChoice(
             name: 'ACTION',
-            choices: ['Infrastructure Bootstrapping', 'Infrastructure Configuration', 'Application Deployment', 
-                     'Stop running Server', 'Start Server', 'Display Addresses', 'Destroy Infrastructure'],
-            description: 'Select an action to perform'
+            script: '''
+                // Get AWS credentials from Jenkins
+                def awsCredentials = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(
+                    com.cloudbees.jenkins.plugins.awscredentials.AWSCredentials.class,
+                    Jenkins.instance
+                )
+                
+                // Set up AWS client
+                def region = params.AWS_REGION ?: 'eu-west-1'
+                def client = new com.amazonaws.services.ec2.AmazonEC2Client(
+                    new com.amazonaws.auth.BasicAWSCredentials(
+                        awsCredentials[0].getAccessKey(),
+                        awsCredentials[0].getSecretKey()
+                    )
+                )
+                client.setRegion(com.amazonaws.regions.RegionUtils.getRegion(region))
+                
+                // Check instances
+                def masterFilter = new com.amazonaws.services.ec2.model.Filter("tag:Name", ["master_instance"])
+                def workerFilter = new com.amazonaws.services.ec2.model.Filter("tag:Name", ["worker_instance"])
+                
+                def masterResult = client.describeInstances(new com.amazonaws.services.ec2.model.DescribeInstancesRequest().withFilters(masterFilter))
+                def workerResult = client.describeInstances(new com.amazonaws.services.ec2.model.DescribeInstancesRequest().withFilters(workerFilter))
+                
+                // Determine state
+                def hasInstances = false
+                def hasRunning = false
+                def hasStopped = false
+                
+                // Process results
+                def processInstance = { instance ->
+                    hasInstances = true
+                    def state = instance.getState().getName()
+                    if (state == "running") {
+                        hasRunning = true
+                    } else if (state == "stopped") {
+                        hasStopped = true
+                    }
+                }
+                
+                masterResult.getReservations().each { reservation ->
+                    reservation.getInstances().each { instance ->
+                        processInstance(instance)
+                    }
+                }
+                
+                workerResult.getReservations().each { reservation ->
+                    reservation.getInstances().each { instance ->
+                        processInstance(instance)
+                    }
+                }
+                
+                // Return available actions based on state
+                def actions = []
+                
+                if (!hasInstances) {
+                    actions.add("Infrastructure Bootstrapping")
+                }
+                if (hasRunning) {
+                    actions.add("Infrastructure Configuration")
+                    actions.add("Application Deployment")
+                    actions.add("Stop running Server")
+                    actions.add("Display Addresses")
+                }
+                if (hasStopped) {
+                    actions.add("Start Server")
+                }
+                if (hasInstances) {
+                    actions.add("Destroy Infrastructure")
+                }
+                
+                return actions
+            ''',
+            description: 'Select an action to perform',
+            filterLength: 1,
+            filterable: false,
+            choiceType: 'PT_SINGLE_SELECT'
         )
         
         // Only shown when Destroy Infrastructure is selected
