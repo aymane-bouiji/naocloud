@@ -15,66 +15,7 @@ pipeline {
                 script: [
                     classpath: [],
                     sandbox: true,
-                    script: '''
-                        // Execute shell script to determine available actions based on server state
-                        def actions = sh(script: """
-                            set +x
-                            export AWS_DEFAULT_REGION=${AWS_REGION}
-                            
-                            # Check master instances
-                            MASTER_DATA=\$(aws ec2 describe-instances \
-                                --filters "Name=tag:Name,Values=master_instance" \
-                                --query "Reservations[].Instances[].State.Name" \
-                                --output text 2>/dev/null)
-                            
-                            # Check worker instances
-                            WORKER_DATA=\$(aws ec2 describe-instances \
-                                --filters "Name=tag:Name,Values=worker_instance" \
-                                --query "Reservations[].Instances[].State.Name" \
-                                --output text 2>/dev/null)
-                            
-                            # Initialize state flags
-                            has_instances=false
-                            has_running=false
-                            has_stopped=false
-                            
-                            # Process master and worker data
-                            for state in \$MASTER_DATA \$WORKER_DATA; do
-                                has_instances=true
-                                if [ "\$state" = "running" ] || [ "\$state" = "pending" ]; then
-                                    has_running=true
-                                elif [ "\$state" = "stopped" ]; then
-                                    has_stopped=true
-                                fi
-                            done
-                            
-                            # Determine available actions based on state
-                            actions=()
-                            if [ "\$has_instances" = "false" ]; then
-                                actions+=("Infrastructure Bootstrapping")
-                            fi
-                            if [ "\$has_running" = "true" ]; then
-                                actions+=("Infrastructure Configuration")
-                                actions+=("Application Deployment")
-                                actions+=("Stop running Server")
-                                actions+=("Display Addresses")
-                            fi
-                            if [ "\$has_stopped" = "true" ]; then
-                                actions+=("Start Server")
-                            fi
-                            if [ "\$has_instances" = "true" ]; then
-                                actions+=("Destroy Infrastructure")
-                            fi
-                            
-                            # Output actions, one per line
-                            for action in "\${actions[@]}"; do
-                                echo "\$action"
-                            done
-                        """, returnStdout: true).trim().split('\n')
-                        
-                        // Return the list of actions for the Active Choices parameter
-                        return actions ?: ['No actions available']
-                    '''
+                    script: evaluate(readFile('scripts/getEc2Actions.groovy'))
                 ]
             ]
         )
@@ -192,6 +133,9 @@ pipeline {
                     }
                     if (params.ACTION == 'Destroy Infrastructure' && params.DESTROY_CONFIRMATION != 'destroy') {
                         error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
+                    }
+                    if (params.ACTION == 'No valid actions available') {
+                        error("❌ No valid actions are available based on the current server state. Check instance states and try again.")
                     }
                 }
             }
