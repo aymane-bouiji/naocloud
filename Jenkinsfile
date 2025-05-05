@@ -1,97 +1,88 @@
 pipeline {
-   agent any
+    agent any
     
     parameters {
-        // Static parameters
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
         string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
-        
-        // Dynamic parameter using Active Choices
-        // This will call a Groovy script that checks EC2 instance state and returns appropriate actions
         activeChoice(
             name: 'ACTION',
-            script: '''
-                // Get AWS credentials from Jenkins
-                def awsCredentials = com.cloudbees.plugins.credentials.CredentialsProvider.lookupCredentials(
-                    com.cloudbees.jenkins.plugins.awscredentials.AWSCredentials.class,
-                    Jenkins.instance
-                )
-                
-                // Set up AWS client
-                def region = params.AWS_REGION ?: 'eu-west-1'
-                def client = new com.amazonaws.services.ec2.AmazonEC2Client(
-                    new com.amazonaws.auth.BasicAWSCredentials(
-                        awsCredentials[0].getAccessKey(),
-                        awsCredentials[0].getSecretKey()
-                    )
-                )
-                client.setRegion(com.amazonaws.regions.RegionUtils.getRegion(region))
-                
-                // Check instances
-                def masterFilter = new com.amazonaws.services.ec2.model.Filter("tag:Name", ["master_instance"])
-                def workerFilter = new com.amazonaws.services.ec2.model.Filter("tag:Name", ["worker_instance"])
-                
-                def masterResult = client.describeInstances(new com.amazonaws.services.ec2.model.DescribeInstancesRequest().withFilters(masterFilter))
-                def workerResult = client.describeInstances(new com.amazonaws.services.ec2.model.DescribeInstancesRequest().withFilters(workerFilter))
-                
-                // Determine state
-                def hasInstances = false
-                def hasRunning = false
-                def hasStopped = false
-                
-                // Process results
-                def processInstance = { instance ->
-                    hasInstances = true
-                    def state = instance.getState().getName()
-                    if (state == "running") {
-                        hasRunning = true
-                    } else if (state == "stopped") {
-                        hasStopped = true
-                    }
-                }
-                
-                masterResult.getReservations().each { reservation ->
-                    reservation.getInstances().each { instance ->
-                        processInstance(instance)
-                    }
-                }
-                
-                workerResult.getReservations().each { reservation ->
-                    reservation.getInstances().each { instance ->
-                        processInstance(instance)
-                    }
-                }
-                
-                // Return available actions based on state
-                def actions = []
-                
-                if (!hasInstances) {
-                    actions.add("Infrastructure Bootstrapping")
-                }
-                if (hasRunning) {
-                    actions.add("Infrastructure Configuration")
-                    actions.add("Application Deployment")
-                    actions.add("Stop running Server")
-                    actions.add("Display Addresses")
-                }
-                if (hasStopped) {
-                    actions.add("Start Server")
-                }
-                if (hasInstances) {
-                    actions.add("Destroy Infrastructure")
-                }
-                
-                return actions
-            ''',
             description: 'Select an action to perform',
-            filterLength: 1,
             filterable: false,
-            choiceType: 'PT_SINGLE_SELECT'
+            choiceType: 'PT_SINGLE_SELECT',
+            script: [
+                $class: 'GroovyScript',
+                script: [
+                    classpath: [],
+                    sandbox: true,
+                    script: '''
+                        // Execute shell script to determine available actions based on server state
+                        def actions = sh(script: """
+                            set +x
+                            export AWS_DEFAULT_REGION=${AWS_REGION}
+                            
+                            # Check master instances
+                            MASTER_DATA=\$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=master_instance" \
+                                --query "Reservations[].Instances[].State.Name" \
+                                --output text 2>/dev/null)
+                            
+                            # Check worker instances
+                            WORKER_DATA=\$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=worker_instance" \
+                                --query "Reservations[].Instances[].State.Name" \
+                                --output text 2>/dev/null)
+                            
+                            # Initialize state flags
+                            has_instances=false
+                            has_running=false
+                            has_stopped=false
+                            
+                            # Process master and worker data
+                            for state in \$MASTER_DATA \$WORKER_DATA; do
+                                has_instances=true
+                                if [ "\$state" = "running" ] || [ "\$state" = "pending" ]; then
+                                    has_running=true
+                                elif [ "\$state" = "stopped" ]; then
+                                    has_stopped=true
+                                fi
+                            done
+                            
+                            # Determine available actions based on state
+                            actions=()
+                            if [ "\$has_instances" = "false" ]; then
+                                actions+=("Infrastructure Bootstrapping")
+                            fi
+                            if [ "\$has_running" = "true" ]; then
+                                actions+=("Infrastructure Configuration")
+                                actions+=("Application Deployment")
+                                actions+=("Stop running Server")
+                                actions+=("Display Addresses")
+                            fi
+                            if [ "\$has_stopped" = "true" ]; then
+                                actions+=("Start Server")
+                            fi
+                            if [ "\$has_instances" = "true" ]; then
+                                actions+=("Destroy Infrastructure")
+                            fi
+                            
+                            # Output actions, one per line
+                            for action in "\${actions[@]}"; do
+                                echo "\$action"
+                            done
+                        """, returnStdout: true).trim().split('\n')
+                        
+                        // Return the list of actions for the Active Choices parameter
+                        return actions ?: ['No actions available']
+                    '''
+                ]
+            ]
         )
-        
-        // Only shown when Destroy Infrastructure is selected
-        string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
+        string(
+            name: 'DESTROY_CONFIRMATION',
+            defaultValue: '',
+            description: 'Type "destroy" to confirm deletion of the cloud environment (only required for Destroy Infrastructure)'
+        )
     }
     
     stages {
@@ -155,14 +146,12 @@ pipeline {
                     echo "==================="
                 '''
                 
-                // Load server state into environment variables
                 script {
                     def props = readProperties file: 'server_state.properties'
                     env.HAS_INSTANCES = props.HAS_INSTANCES
                     env.HAS_RUNNING = props.HAS_RUNNING
                     env.HAS_STOPPED = props.HAS_STOPPED
                     
-                    // Display recommended actions based on state
                     echo "Recommended actions based on current state:"
                     if (env.HAS_INSTANCES == 'false') {
                         echo "- Infrastructure Bootstrapping (create new infrastructure)"
@@ -186,27 +175,21 @@ pipeline {
         stage('Parameter Validation') {
             steps {
                 script {
-                    // Validate based on server state
                     if (params.ACTION == 'Infrastructure Bootstrapping' && env.HAS_INSTANCES == 'true') {
                         error("❌ Cannot bootstrap infrastructure when instances already exist. Consider using Destroy Infrastructure first.")
                     }
-                    
                     if (params.ACTION == 'Start Server' && env.HAS_STOPPED != 'true') {
                         error("❌ No stopped instances found to start.")
                     }
-                    
                     if (params.ACTION == 'Stop running Server' && env.HAS_RUNNING != 'true') {
                         error("❌ No running instances found to stop.")
                     }
-                    
                     if ((params.ACTION == 'Infrastructure Configuration' || 
                          params.ACTION == 'Application Deployment' || 
                          params.ACTION == 'Display Addresses') && 
                         env.HAS_RUNNING != 'true') {
                         error("❌ This action requires running instances. Please start the server first.")
                     }
-                    
-                    // Validate destroy confirmation
                     if (params.ACTION == 'Destroy Infrastructure' && params.DESTROY_CONFIRMATION != 'destroy') {
                         error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
                     }
@@ -343,7 +326,6 @@ pipeline {
         success {
             echo "Pipeline completed successfully"
             script {
-                // Suggest next steps based on completed action
                 switch(params.ACTION) {
                     case 'Infrastructure Bootstrapping':
                         echo "✅ Infrastructure created successfully! Next steps:"
