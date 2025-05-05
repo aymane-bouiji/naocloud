@@ -69,15 +69,21 @@ pipeline {
         // The rest of your stages...
         stage('Parameter Validation') {
             steps {
-                getContext()
-                // Your existing parameter validation
+                // Replace getContext() with a more specific implementation
+                script {
+                    echo "Validating parameters for action: ${params.ACTION}"
+                    // Add your parameter validation logic here
+                }
             }
         }
         
         stage('Execute Action') {
             steps {
-                getContext()
-                // Your existing action execution
+                // Replace getContext() with a more specific implementation
+                script {
+                    echo "Executing action: ${params.ACTION}"
+                    // Add your action execution logic here
+                }
             }
         }
     }
