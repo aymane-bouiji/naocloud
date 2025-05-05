@@ -16,53 +16,80 @@ pipeline {
                     classpath: [],
                     sandbox: true,
                     script: '''
+                        def debugMessages = []
+                        debugMessages.add("DEBUG: Starting activeChoice script")
+                        
                         try {
-                            println "DEBUG: Starting activeChoice script"
                             def awsRegion = binding.hasVariable('AWS_REGION') ? binding.variables.get('AWS_REGION') : 'eu-west-1'
-                            println "DEBUG: Using AWS_REGION: ${awsRegion}"
+                            debugMessages.add("DEBUG: Using AWS_REGION: ${awsRegion}")
                             
-                            // Temporarily assume running instances based on console log
-                            def has_instances = true
-                            def has_running = true
+                            // Default states
+                            def has_instances = false
+                            def has_running = false
                             def has_stopped = false
                             
-                            println "DEBUG: has_instances=${has_instances}"
-                            println "DEBUG: has_running=${has_running}"
-                            println "DEBUG: has_stopped=${has_stopped}"
+                            // Try to read instance states from file
+                            try {
+                                def props = new Properties()
+                                def file = new File('instance_states.properties')
+                                if (file.exists()) {
+                                    props.load(file.newReader())
+                                    has_instances = props.getProperty('HAS_INSTANCES', 'false') == 'true'
+                                    has_running = props.getProperty('HAS_RUNNING', 'false') == 'true'
+                                    has_stopped = props.getProperty('HAS_STOPPED', 'false') == 'true'
+                                    debugMessages.add("DEBUG: Loaded states from instance_states.properties")
+                                } else {
+                                    debugMessages.add("DEBUG: instance_states.properties not found, using defaults")
+                                }
+                            } catch (Exception e) {
+                                debugMessages.add("DEBUG: Failed to read instance_states.properties: ${e.message}")
+                            }
+                            
+                            debugMessages.add("DEBUG: has_instances=${has_instances}")
+                            debugMessages.add("DEBUG: has_running=${has_running}")
+                            debugMessages.add("DEBUG: has_stopped=${has_stopped}")
                             
                             // Generate actions
                             def actions = []
                             if (!has_instances) {
-                                actions << "Infrastructure Bootstrapping"
-                                println "DEBUG: Added action: Infrastructure Bootstrapping"
+                                actions.add("Infrastructure Bootstrapping")
+                                debugMessages.add("DEBUG: Added action: Infrastructure Bootstrapping")
                             }
                             if (has_running) {
-                                actions << "Infrastructure Configuration"
-                                actions << "Application Deployment"
-                                actions << "Stop running Server"
-                                actions << "Display Addresses"
-                                println "DEBUG: Added actions for running instances"
+                                actions.add("Infrastructure Configuration")
+                                actions.add("Application Deployment")
+                                actions.add("Stop running Server")
+                                actions.add("Display Addresses")
+                                debugMessages.add("DEBUG: Added actions for running instances")
                             }
                             if (has_stopped) {
-                                actions << "Start Server"
-                                println "DEBUG: Added action: Start Server"
+                                actions.add("Start Server")
+                                debugMessages.add("DEBUG: Added action: Start Server")
                             }
                             if (has_instances) {
-                                actions << "Destroy Infrastructure"
-                                println "DEBUG: Added action: Destroy Infrastructure"
+                                actions.add("Destroy Infrastructure")
+                                debugMessages.add("DEBUG: Added action: Destroy Infrastructure")
                             }
                             
-                            // Ensure non-empty return
+                            // Return actions or fallback
                             if (actions.isEmpty()) {
-                                println "DEBUG: No actions generated, returning fallback"
-                                return ['No valid actions available']
+                                debugMessages.add("DEBUG: No actions generated, returning fallback")
+                                actions.add("No valid actions available")
                             }
                             
-                            println "DEBUG: Final actions: ${actions}"
+                            debugMessages.add("DEBUG: Final actions: ${actions}")
+                            
+                            // Return debug messages if LOG_LEVEL is DEBUG
+                            if (binding.hasVariable('LOG_LEVEL') && binding.variables.get('LOG_LEVEL') == 'DEBUG') {
+                                return debugMessages + actions
+                            }
                             return actions
                         } catch (Exception e) {
-                            println "ERROR: Script failed: ${e.message}"
-                            return ['Error: Script execution failed']
+                            debugMessages.add("ERROR: Script failed: ${e.message}")
+                            if (binding.hasVariable('LOG_LEVEL') && binding.variables.get('LOG_LEVEL') == 'DEBUG') {
+                                return debugMessages + ["Error: Script execution failed"]
+                            }
+                            return ["Error: Script execution failed"]
                         }
                     '''
                 ]
@@ -76,6 +103,49 @@ pipeline {
     }
     
     stages {
+        stage('Check Instance States') {
+            steps {
+                sh '''
+                    set +x
+                    export AWS_DEFAULT_REGION=${AWS_REGION}
+                    echo "=== Checking Instance States ==="
+                    
+                    # Query master and worker instances
+                    MASTER_DATA=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=master_instance" \
+                        --query "Reservations[].Instances[].[InstanceId,State.Name]" \
+                        --output text 2>/tmp/aws_error.log)
+                    WORKER_DATA=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=worker_instance" \
+                        --query "Reservations[].Instances[].[InstanceId,State.Name]" \
+                        --output text 2>/tmp/aws_error.log)
+                    
+                    # Log any AWS CLI errors
+                    if [ -s /tmp/aws_error.log ]; then
+                        echo "AWS CLI errors:"
+                        cat /tmp/aws_error.log
+                    fi
+                    
+                    # Determine states
+                    echo "HAS_INSTANCES=false" > instance_states.properties
+                    echo "HAS_RUNNING=false" >> instance_states.properties
+                    echo "HAS_STOPPED=false" >> instance_states.properties
+                    
+                    if [ -n "$MASTER_DATA" ] || [ -n "$WORKER_DATA" ]; then
+                        echo "HAS_INSTANCES=true" > instance_states.properties
+                        if echo "$MASTER_DATA" | grep -q "running" || echo "$WORKER_DATA" | grep -q "running"; then
+                            echo "HAS_RUNNING=true" >> instance_states.properties
+                        fi
+                        if echo "$MASTER_DATA" | grep -q "stopped" || echo "$WORKER_DATA" | grep -q "stopped"; then
+                            echo "HAS_STOPPED=true" >> instance_states.properties
+                        fi
+                    fi
+                    
+                    echo "=== Instance States Saved ==="
+                '''
+            }
+        }
+        
         stage('Display Server State') {
             steps {
                 sh '''
