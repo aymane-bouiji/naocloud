@@ -5,8 +5,106 @@ pipeline {
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
         string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
-        // Hidden property that will be used to rebuild the job with current state
-        string(name: 'SERVER_STATE', defaultValue: '', description: 'Hidden property for server state tracking')
+        // Use an active choice parameter that looks up the server state each time
+        activeChoice(
+            name: 'ACTION',
+            description: 'Select an action to perform',
+            filterable: false,
+            choiceType: 'PT_SINGLE_SELECT',
+            script: [
+                $class: 'GroovyScript',
+                script: [
+                    classpath: [],
+                    sandbox: true,
+                    script: '''
+                        try {
+                            def awsRegion = binding.hasVariable('AWS_REGION') ? binding.variables.get('AWS_REGION') : 'eu-west-1'
+                            
+                            // Variables to track instance state
+                            def has_instances = false
+                            def has_running = false
+                            def has_stopped = false
+                            
+                            // Run AWS CLI command to check instance states
+                            def checkCmd = """
+                                export AWS_DEFAULT_REGION=${awsRegion}
+                                aws ec2 describe-instances --filters "Name=tag:Name,Values=master_instance,worker_instance" --query "Reservations[].Instances[].[Tags[?Key=='Name'].Value | [0], State.Name]" --output text
+                            """
+                            
+                            def result = sh(script: checkCmd, returnStdout: true).trim()
+                            
+                            // Parse results to determine state
+                            if (result) {
+                                has_instances = true
+                                result.split("\\n").each { line ->
+                                    def parts = line.split()
+                                    if (parts.length > 1) {
+                                        def state = parts[1]
+                                        if (state == "running") {
+                                            has_running = true
+                                        } else if (state == "stopped") {
+                                            has_stopped = true
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Generate available actions based on state
+                            def actions = []
+                            
+                            if (!has_instances) {
+                                actions.add("Infrastructure Bootstrapping")
+                            }
+                            if (has_running) {
+                                actions.add("Infrastructure Configuration")
+                                actions.add("Application Deployment")
+                                actions.add("Stop running Server")
+                                actions.add("Display Addresses")
+                            }
+                            if (has_stopped) {
+                                actions.add("Start Server")
+                            }
+                            if (has_instances) {
+                                actions.add("Destroy Infrastructure")
+                            }
+                            
+                            // If no actions determined, provide a fallback
+                            if (actions.isEmpty()) {
+                                actions.add("No valid actions available")
+                            }
+                            
+                            return actions
+                            
+                        } catch (Exception e) {
+                            // Log error and provide fallback options
+                            def errorMessage = "Error determining server state: ${e.message}"
+                            println(errorMessage)
+                            
+                            // Write to a log file for debugging
+                            try {
+                                new File('/var/jenkins_home/workspace/naoserver/active_choice_error.log').text = errorMessage
+                            } catch (Exception ignored) {}
+                            
+                            // Return all possible options as fallback
+                            return [
+                                "Infrastructure Bootstrapping",
+                                "Infrastructure Configuration",
+                                "Application Deployment",
+                                "Stop running Server",
+                                "Display Addresses",
+                                "Start Server",
+                                "Destroy Infrastructure"
+                            ]
+                        }
+                    '''
+                ]
+            ]
+        )
+        string(
+            name: 'DESTROY_CONFIRMATION',
+            defaultValue: '',
+            description: 'Type "destroy" to confirm deletion of the cloud environment (only required for Destroy Infrastructure)'
+        )
     }
     
     stages {
@@ -57,91 +155,10 @@ pipeline {
                     env.HAS_RUNNING = props.HAS_RUNNING
                     env.HAS_STOPPED = props.HAS_STOPPED
                     
-                    // Generate available actions based on actual infrastructure state
-                    def availableActions = []
-                    
-                    if (env.HAS_INSTANCES == 'false') {
-                        availableActions.add("Infrastructure Bootstrapping")
-                    }
-                    if (env.HAS_RUNNING == 'true') {
-                        availableActions.add("Infrastructure Configuration")
-                        availableActions.add("Application Deployment")
-                        availableActions.add("Stop running Server")
-                        availableActions.add("Display Addresses")
-                    }
-                    if (env.HAS_STOPPED == 'true') {
-                        availableActions.add("Start Server")
-                    }
-                    if (env.HAS_INSTANCES == 'true') {
-                        availableActions.add("Destroy Infrastructure")
-                    }
-                    
-                    // If no actions determined, provide a fallback
-                    if (availableActions.isEmpty()) {
-                        availableActions.add("No valid actions available")
-                    }
-                    
-                    // Store the current state and available actions
-                    env.SERVER_STATE_CURRENT = "has_instances=${env.HAS_INSTANCES},has_running=${env.HAS_RUNNING},has_stopped=${env.HAS_STOPPED}"
-                    env.AVAILABLE_ACTIONS = availableActions.join(',')
-                    
-                    echo "Current server state: ${env.SERVER_STATE_CURRENT}"
-                    echo "Available actions: ${env.AVAILABLE_ACTIONS}"
-                    
-                    // Check if the job was rebuilt with accurate state
-                    if (params.SERVER_STATE != env.SERVER_STATE_CURRENT) {
-                        // First run or state changed, rebuild with current state
-                        echo "Server state changed or first run detected. Rebuilding job with updated state..."
-                        
-                        // Build the action parameter for the new build
-                        def actionParam = '''
-                            <input type="choice" name="ACTION" description="Select an action to perform">
-                        '''
-                        availableActions.each { action ->
-                            actionParam += "<option value=\"${action}\">${action}</option>"
-                        }
-                        actionParam += '</input>'
-                        
-                        // Add destroy confirmation parameter conditionally
-                        def destroyParam = ''
-                        if (availableActions.contains("Destroy Infrastructure")) {
-                            destroyParam = '''
-                                <input type="string" name="DESTROY_CONFIRMATION" default="" 
-                                description="Type &quot;destroy&quot; to confirm deletion of the cloud environment (only required for Destroy Infrastructure)">
-                                </input>
-                            '''
-                        }
-                        
-                        // Rebuild with current parameters plus accurate state
-                        build job: env.JOB_NAME, parameters: [
-                            string(name: 'AWS_REGION', value: params.AWS_REGION),
-                            string(name: 'LOG_LEVEL', value: params.LOG_LEVEL),
-                            string(name: 'CLUSTER_VERSION', value: params.CLUSTER_VERSION),
-                            string(name: 'SERVER_STATE', value: env.SERVER_STATE_CURRENT),
-                            text(name: 'ACTION_CHOICES', value: actionParam),
-                            text(name: 'DESTROY_PARAM', value: destroyParam)
-                        ], wait: false
-                        
-                        // Abort the current build
-                        currentBuild.result = 'ABORTED'
-                        error("Rebuilding job with updated state...")
-                    } else {
-                        echo "Server state unchanged. Continuing with execution..."
-                        
-                        // Dynamically create ACTION parameter
-                        if (!params.ACTION) {
-                            echo "ACTION parameter not set. Please select an action from the available options."
-                            currentBuild.result = 'ABORTED'
-                            error("ACTION parameter not set")
-                        }
-                        
-                        // Check if the selected action is valid
-                        if (!env.AVAILABLE_ACTIONS.split(',').contains(params.ACTION)) {
-                            echo "Selected action '${params.ACTION}' is not currently valid. Available actions: ${env.AVAILABLE_ACTIONS}"
-                            currentBuild.result = 'ABORTED'
-                            error("Invalid action selected")
-                        }
-                    }
+                    echo "Current server state:"
+                    echo "- Has instances: ${env.HAS_INSTANCES}"
+                    echo "- Has running instances: ${env.HAS_RUNNING}"
+                    echo "- Has stopped instances: ${env.HAS_STOPPED}"
                 }
             }
         }
@@ -184,9 +201,33 @@ pipeline {
                 
                 script {
                     echo "Selected action: ${params.ACTION}"
-                    echo "Available actions based on current state:"
-                    env.AVAILABLE_ACTIONS.split(',').each { action ->
+                    
+                    // Determine valid actions
+                    def validActions = []
+                    if (env.HAS_INSTANCES != 'true') {
+                        validActions.add("Infrastructure Bootstrapping")
+                    }
+                    if (env.HAS_RUNNING == 'true') {
+                        validActions.add("Infrastructure Configuration")
+                        validActions.add("Application Deployment")
+                        validActions.add("Stop running Server")
+                        validActions.add("Display Addresses")
+                    }
+                    if (env.HAS_STOPPED == 'true') {
+                        validActions.add("Start Server")
+                    }
+                    if (env.HAS_INSTANCES == 'true') {
+                        validActions.add("Destroy Infrastructure")
+                    }
+                    
+                    echo "Valid actions for current state:"
+                    validActions.each { action ->
                         echo "- ${action}"
+                    }
+                    
+                    // Check if the selected action is valid
+                    if (!validActions.contains(params.ACTION)) {
+                        error("❌ The selected action '${params.ACTION}' is not valid for the current server state. Please select one of: ${validActions.join(', ')}")
                     }
                 }
             }
@@ -351,24 +392,24 @@ pipeline {
             script {
                 switch(params.ACTION) {
                     case 'Infrastructure Bootstrapping':
-                        echo "✅ Infrastructure created successfully! Next steps:"
-                        echo "1. Run again to get updated action options based on new state"
+                        echo "✅ Infrastructure created successfully!"
+                        echo "Run the pipeline again to see updated action options"
                         break
                     case 'Start Server':
-                        echo "✅ Server started successfully! Next steps:"
-                        echo "1. Run again to get updated action options based on new state"
+                        echo "✅ Server started successfully!"
+                        echo "Run the pipeline again to see updated action options"
                         break
                     case 'Stop running Server':
-                        echo "✅ Server stopped successfully! Next steps:"
-                        echo "1. Run again to get updated action options based on new state"
+                        echo "✅ Server stopped successfully!"
+                        echo "Run the pipeline again to see updated action options"
                         break
                     case 'Destroy Infrastructure':
-                        echo "✅ Infrastructure destroyed successfully! Next steps:"
-                        echo "1. Run again to get updated action options based on new state"
+                        echo "✅ Infrastructure destroyed successfully!"
+                        echo "Run the pipeline again to see updated action options"
                         break
                     default:
                         echo "✅ Action '${params.ACTION}' completed successfully"
-                        echo "Run again to get updated actions based on current state"
+                        echo "Run the pipeline again to see updated action options"
                 }
             }
         }
