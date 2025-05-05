@@ -318,7 +318,8 @@ pipeline {
                     if (params.ACTION == 'Stop running Server' && env.HAS_RUNNING != 'true') {
                         error("❌ No running instances found to stop.")
                     }
-                    if ((params.ACTION  params.ACTION == 'Application Deployment' || 
+                    if ((params.ACTION == 'Infrastructure Configuration' || 
+                         params.ACTION == 'Application Deployment' || 
                          params.ACTION == 'Display Addresses') && 
                         env.HAS_RUNNING != 'true') {
                         error("❌ This action requires running instances. Please start the server first.")
