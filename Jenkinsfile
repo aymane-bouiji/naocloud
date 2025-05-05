@@ -23,26 +23,72 @@ pipeline {
                             def awsRegion = binding.hasVariable('AWS_REGION') ? binding.variables.get('AWS_REGION') : 'eu-west-1'
                             debugMessages.add("DEBUG: Using AWS_REGION: ${awsRegion}")
                             
-                            // Default states
-                            def has_instances = false
+                            // Default states (assume stopped instances based on latest log)
+                            def has_instances = true
                             def has_running = false
-                            def has_stopped = false
+                            def has_stopped = true
                             
-                            // Try to read instance states from file
+                            // Try to read instance_states.properties from workspace
                             try {
                                 def props = new Properties()
-                                def file = new File('instance_states.properties')
+                                def file = new File('/var/jenkins_home/workspace/naoserver/instance_states.properties')
                                 if (file.exists()) {
                                     props.load(file.newReader())
-                                    has_instances = props.getProperty('HAS_INSTANCES', 'false') == 'true'
+                                    has_instances = props.getProperty('HAS_INSTANCES', 'true') == 'true'
                                     has_running = props.getProperty('HAS_RUNNING', 'false') == 'true'
-                                    has_stopped = props.getProperty('HAS_STOPPED', 'false') == 'true'
+                                    has_stopped = props.getProperty('HAS_STOPPED', 'true') == 'true'
                                     debugMessages.add("DEBUG: Loaded states from instance_states.properties")
+                                    debugMessages.add("DEBUG: File contents: ${props}")
                                 } else {
                                     debugMessages.add("DEBUG: instance_states.properties not found, using defaults")
                                 }
                             } catch (Exception e) {
                                 debugMessages.add("DEBUG: Failed to read instance_states.properties: ${e.message}")
+                            }
+                            
+                            // Try to fetch instance states via AWS CLI
+                            try {
+                                def masterCmd = """
+                                    export AWS_DEFAULT_REGION=${awsRegion}
+                                    aws ec2 describe-instances \
+                                        --filters "Name=tag:Name,Values=master_instance" \
+                                        --query "Reservations[].Instances[].State.Name" \
+                                        --output text
+                                """
+                                def workerCmd = """
+                                    export AWS_DEFAULT_REGION=${awsRegion}
+                                    aws ec2 describe-instances \
+                                        --filters "Name=tag:Name,Values=worker_instance" \
+                                        --query "Reservations[].Instances[].State.Name" \
+                                        --output text
+                                """
+                                
+                                def masterData = sh(script: masterCmd, returnStdout: true).trim()
+                                def workerData = sh(script: workerCmd, returnStdout: true).trim()
+                                
+                                debugMessages.add("DEBUG: Master instance states: ${masterData}")
+                                debugMessages.add("DEBUG: Worker instance states: ${workerData}")
+                                
+                                // Process states
+                                def allStates = "${masterData} ${workerData}".trim()
+                                if (allStates) {
+                                    has_instances = true
+                                    has_running = false
+                                    has_stopped = false
+                                    allStates.split().each { state ->
+                                        if (state == 'running' || state == 'pending') {
+                                            has_running = true
+                                        } else if (state == 'stopped') {
+                                            has_stopped = true
+                                        }
+                                    }
+                                } else {
+                                    has_instances = false
+                                    has_running = false
+                                    has_stopped = false
+                                }
+                            } catch (Exception e) {
+                                debugMessages.add("ERROR: AWS CLI command failed: ${e.message}")
                             }
                             
                             debugMessages.add("DEBUG: has_instances=${has_instances}")
@@ -79,6 +125,13 @@ pipeline {
                             
                             debugMessages.add("DEBUG: Final actions: ${actions}")
                             
+                            // Persist debug logs
+                            try {
+                                new File('/var/jenkins_home/workspace/naoserver/active_choice_debug.log').text = debugMessages.join('\\n')
+                            } catch (Exception e) {
+                                debugMessages.add("DEBUG: Failed to write debug log: ${e.message}")
+                            }
+                            
                             // Return debug messages if LOG_LEVEL is DEBUG
                             if (binding.hasVariable('LOG_LEVEL') && binding.variables.get('LOG_LEVEL') == 'DEBUG') {
                                 return debugMessages + actions
@@ -86,6 +139,9 @@ pipeline {
                             return actions
                         } catch (Exception e) {
                             debugMessages.add("ERROR: Script failed: ${e.message}")
+                            try {
+                                new File('/var/jenkins_home/workspace/naoserver/active_choice_debug.log').text = debugMessages.join('\\n')
+                            } catch (Exception ignored) {}
                             if (binding.hasVariable('LOG_LEVEL') && binding.variables.get('LOG_LEVEL') == 'DEBUG') {
                                 return debugMessages + ["Error: Script execution failed"]
                             }
