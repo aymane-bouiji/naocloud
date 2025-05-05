@@ -23,69 +23,87 @@ pipeline {
                             def awsRegion = binding.hasVariable('AWS_REGION') ? binding.variables.get('AWS_REGION') : 'eu-west-1'
                             debugMessages.add("DEBUG: Using AWS_REGION: ${awsRegion}")
                             
-                            // Default states (assume stopped instances based on latest log)
+                            // Default states (neutral to avoid incorrect bootstrapping)
                             def has_instances = true
                             def has_running = false
-                            def has_stopped = true
+                            def has_stopped = false
                             
-                            // Try to read instance_states.properties from workspace
+                            // Try AWS CLI via awsStep (Pipeline: AWS Steps plugin)
                             try {
-                                def props = new Properties()
-                                def file = new File('/var/jenkins_home/workspace/naoserver/instance_states.properties')
-                                if (file.exists()) {
-                                    props.load(file.newReader())
-                                    has_instances = props.getProperty('HAS_INSTANCES', 'true') == 'true'
-                                    has_running = props.getProperty('HAS_RUNNING', 'false') == 'true'
-                                    has_stopped = props.getProperty('HAS_STOPPED', 'true') == 'true'
-                                    debugMessages.add("DEBUG: Loaded states from instance_states.properties")
-                                    debugMessages.add("DEBUG: File contents: ${props}")
-                                } else {
-                                    debugMessages.add("DEBUG: instance_states.properties not found, using defaults")
-                                }
-                            } catch (Exception e) {
-                                debugMessages.add("DEBUG: Failed to read instance_states.properties: ${e.message}")
-                            }
-                            
-                            // Try to fetch instance states via AWS CLI
-                            try {
-                                def masterCmd = """
-                                    export AWS_DEFAULT_REGION=${awsRegion}
-                                    aws ec2 describe-instances \
-                                        --filters "Name=tag:Name,Values=master_instance" \
-                                        --query "Reservations[].Instances[].State.Name" \
-                                        --output text
-                                """
-                                def workerCmd = """
-                                    export AWS_DEFAULT_REGION=${awsRegion}
-                                    aws ec2 describe-instances \
-                                        --filters "Name=tag:Name,Values=worker_instance" \
-                                        --query "Reservations[].Instances[].State.Name" \
-                                        --output text
-                                """
+                                // Check if awsStep is available
+                                def awsStepAvailable = Jenkins.instance.pluginManager.getPlugin('pipeline-aws') != null
+                                debugMessages.add("DEBUG: awsStep plugin available: ${awsStepAvailable}")
                                 
-                                def masterData = sh(script: masterCmd, returnStdout: true).trim()
-                                def workerData = sh(script: workerCmd, returnStdout: true).trim()
-                                
-                                debugMessages.add("DEBUG: Master instance states: ${masterData}")
-                                debugMessages.add("DEBUG: Worker instance states: ${workerData}")
-                                
-                                // Process states
-                                def allStates = "${masterData} ${workerData}".trim()
-                                if (allStates) {
-                                    has_instances = true
-                                    has_running = false
-                                    has_stopped = false
-                                    allStates.split().each { state ->
-                                        if (state == 'running' || state == 'pending') {
-                                            has_running = true
-                                        } else if (state == 'stopped') {
-                                            has_stopped = true
+                                if (awsStepAvailable) {
+                                    def masterResult = awsStep(
+                                        step: 'ec2DescribeInstances',
+                                        region: awsRegion,
+                                        filters: [[name: 'tag:Name', values: ['master_instance']]],
+                                        query: 'Reservations[].Instances[].{State:State.Name}'
+                                    )
+                                    def workerResult = awsStep(
+                                        step: 'ec2DescribeInstances',
+                                        region: awsRegion,
+                                        filters: [[name: 'tag:Name', values: ['worker_instance']]],
+                                        query: 'Reservations[].Instances[].{State:State.Name}'
+                                    )
+                                    
+                                    def masterStates = masterResult.collect { it.State }.join(' ')
+                                    def workerStates = workerResult.collect { it.State }.join(' ')
+                                    
+                                    debugMessages.add("DEBUG: Master instance states (awsStep): ${masterStates}")
+                                    debugMessages.add("DEBUG: Worker instance states (awsStep): ${workerStates}")
+                                    
+                                    def allStates = "${masterStates} ${workerStates}".trim()
+                                    if (allStates) {
+                                        has_instances = true
+                                        allStates.split().each { state ->
+                                            if (state == 'running' || state == 'pending') {
+                                                has_running = true
+                                            } else if (state == 'stopped') {
+                                                has_stopped = true
+                                            }
                                         }
+                                    } else {
+                                        has_instances = false
                                     }
                                 } else {
-                                    has_instances = false
-                                    has_running = false
-                                    has_stopped = false
+                                    // Fallback to sh step
+                                    debugMessages.add("DEBUG: Falling back to sh step for AWS CLI")
+                                    def masterCmd = """
+                                        export AWS_DEFAULT_REGION=${awsRegion}
+                                        aws ec2 describe-instances \
+                                            --filters "Name=tag:Name,Values=master_instance" \
+                                            --query "Reservations[].Instances[].State.Name" \
+                                            --output text
+                                    """
+                                    def workerCmd = """
+                                        export AWS_DEFAULT_REGION=${awsRegion}
+                                        aws ec2 describe-instances \
+                                            --filters "Name=tag:Name,Values=worker_instance" \
+                                            --query "Reservations[].Instances[].State.Name" \
+                                            --output text
+                                    """
+                                    
+                                    def masterData = sh(script: masterCmd, returnStdout: true).trim()
+                                    def workerData = sh(script: workerCmd, returnStdout: true).trim()
+                                    
+                                    debugMessages.add("DEBUG: Master instance states (sh): ${masterData}")
+                                    debugMessages.add("DEBUG: Worker instance states (sh): ${workerData}")
+                                    
+                                    def allStates = "${masterData} ${workerData}".trim()
+                                    if (allStates) {
+                                        has_instances = true
+                                        allStates.split().each { state ->
+                                            if (state == 'running' || state == 'pending') {
+                                                has_running = true
+                                            } else if (state == 'stopped') {
+                                                has_stopped = true
+                                            }
+                                        }
+                                    } else {
+                                        has_instances = false
+                                    }
                                 }
                             } catch (Exception e) {
                                 debugMessages.add("ERROR: AWS CLI command failed: ${e.message}")
@@ -300,8 +318,7 @@ pipeline {
                     if (params.ACTION == 'Stop running Server' && env.HAS_RUNNING != 'true') {
                         error("❌ No running instances found to stop.")
                     }
-                    if ((params.ACTION == 'Infrastructure Configuration' || 
-                         params.ACTION == 'Application Deployment' || 
+                    if ((params.ACTION  params.ACTION == 'Application Deployment' || 
                          params.ACTION == 'Display Addresses') && 
                         env.HAS_RUNNING != 'true') {
                         error("❌ This action requires running instances. Please start the server first.")
