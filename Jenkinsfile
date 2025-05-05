@@ -1,86 +1,26 @@
-def getServerState() {
-    def masterState = sh(script: '''
-        export AWS_DEFAULT_REGION=${AWS_REGION:-eu-west-1}
-        aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=master_instance" \
-            --query "Reservations[].Instances[].[State.Name]" \
-            --output text
-    ''', returnStdout: true).trim()
-    
-    def workerState = sh(script: '''
-        export AWS_DEFAULT_REGION=${AWS_REGION:-eu-west-1}
-        aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=worker_instance" \
-            --query "Reservations[].Instances[].[State.Name]" \
-            --output text
-    ''', returnStdout: true).trim()
-    
-    return [masterState: masterState, workerState: workerState]
-}
-
-properties([
-    parameters([
-        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)'),
-        string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.'),
-        string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image'),
-        // Dynamic parameters with Active Choices
-        activeChoiceReactiveParam(
-            name: 'ACTION',
-            description: 'Select an action to perform',
-            groovyScript: '''
-                // Get server state first
-                def serverState = getServerState()
-                def masterState = serverState.masterState
-                def workerState = serverState.workerState
-                
-                // Define possible actions based on server state
-                def actions = []
-                
-                // If no instances exist
-                if (masterState == '' && workerState == '') {
-                    actions.add('Infrastructure Bootstrapping')
-                } else {
-                    // If instances exist but are stopped
-                    if (masterState == 'stopped' || workerState == 'stopped') {
-                        actions.add('Start Server')
-                    }
-                    
-                    // If instances are running
-                    if (masterState == 'running' || workerState == 'running') {
-                        actions.add('Infrastructure Configuration')
-                        actions.add('Application Deployment')
-                        actions.add('Stop running Server')
-                        actions.add('Display Addresses')
-                    }
-                    
-                    // Always offer destroy option if instances exist
-                    actions.add('Destroy Infrastructure')
-                }
-                
-                return actions
-            '''
-        ),
-        // Conditional parameters that appear based on selected action
-        activeChoiceReactiveParam(
-            name: 'DESTROY_CONFIRMATION',
-            description: 'Type "destroy" to confirm deletion of the cloud environment',
-            referencedParameters: 'ACTION',
-            groovyScript: '''
-                if (ACTION == 'Destroy Infrastructure') {
-                    return ['']
-                } else {
-                    return []
-                }
-            '''
-        )
-    ]),
-    pipelineTriggers([
-        pollSCM('*/5 * * * *')
-    ])
-])
-
 pipeline {
     agent any
+    
+    triggers {
+        pollSCM('*/5 * * * *')
+    }
+    
+    parameters {
+        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
+        string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
+        string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
+        
+        // Dynamic parameter using Active Choices
+        choice(
+            name: 'ACTION',
+            choices: ['Infrastructure Bootstrapping', 'Infrastructure Configuration', 'Application Deployment', 
+                     'Stop running Server', 'Start Server', 'Display Addresses', 'Destroy Infrastructure'],
+            description: 'Select an action to perform'
+        )
+        
+        // Only shown when Destroy Infrastructure is selected
+        string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
+    }
     
     stages {
         stage('Display Server State') {
@@ -116,12 +56,93 @@ pipeline {
                         echo "  No worker instances found with tag Name=worker_instance"
                     fi
                     
+                    # Capture server state information for later use
+                    echo "Setting environment variables based on server state..."
+                    
+                    # Determine if there are any instances
+                    if [ -n "$MASTER_DATA" ] || [ -n "$WORKER_DATA" ]; then
+                        echo "HAS_INSTANCES=true" > server_state.properties
+                    else
+                        echo "HAS_INSTANCES=false" > server_state.properties
+                    fi
+                    
+                    # Determine if there are running instances
+                    if echo "$MASTER_DATA" | grep -q "running" || echo "$WORKER_DATA" | grep -q "running"; then
+                        echo "HAS_RUNNING=true" >> server_state.properties
+                    else
+                        echo "HAS_RUNNING=false" >> server_state.properties
+                    fi
+                    
+                    # Determine if there are stopped instances
+                    if echo "$MASTER_DATA" | grep -q "stopped" || echo "$WORKER_DATA" | grep -q "stopped"; then
+                        echo "HAS_STOPPED=true" >> server_state.properties
+                    else
+                        echo "HAS_STOPPED=false" >> server_state.properties
+                    fi
+                    
                     echo "==================="
                 '''
+                
+                // Load server state into environment variables
+                script {
+                    def props = readProperties file: 'server_state.properties'
+                    env.HAS_INSTANCES = props.HAS_INSTANCES
+                    env.HAS_RUNNING = props.HAS_RUNNING
+                    env.HAS_STOPPED = props.HAS_STOPPED
+                    
+                    // Display recommended actions based on state
+                    echo "Recommended actions based on current state:"
+                    if (env.HAS_INSTANCES == 'false') {
+                        echo "- Infrastructure Bootstrapping (create new infrastructure)"
+                    }
+                    if (env.HAS_RUNNING == 'true') {
+                        echo "- Infrastructure Configuration (configure existing infrastructure)"
+                        echo "- Application Deployment (deploy applications)"
+                        echo "- Stop running Server (stop instances)"
+                        echo "- Display Addresses (show public addresses)"
+                    }
+                    if (env.HAS_STOPPED == 'true') {
+                        echo "- Start Server (restart instances)"
+                    }
+                    if (env.HAS_INSTANCES == 'true') {
+                        echo "- Destroy Infrastructure (remove all resources)"
+                    }
+                }
             }
         }
 
-        stage('Execute Selected Action') {
+        stage('Parameter Validation') {
+            steps {
+                script {
+                    // Validate based on server state
+                    if (params.ACTION == 'Infrastructure Bootstrapping' && env.HAS_INSTANCES == 'true') {
+                        error("❌ Cannot bootstrap infrastructure when instances already exist. Consider using Destroy Infrastructure first.")
+                    }
+                    
+                    if (params.ACTION == 'Start Server' && env.HAS_STOPPED != 'true') {
+                        error("❌ No stopped instances found to start.")
+                    }
+                    
+                    if (params.ACTION == 'Stop running Server' && env.HAS_RUNNING != 'true') {
+                        error("❌ No running instances found to stop.")
+                    }
+                    
+                    if ((params.ACTION == 'Infrastructure Configuration' || 
+                         params.ACTION == 'Application Deployment' || 
+                         params.ACTION == 'Display Addresses') && 
+                        env.HAS_RUNNING != 'true') {
+                        error("❌ This action requires running instances. Please start the server first.")
+                    }
+                    
+                    // Validate destroy confirmation
+                    if (params.ACTION == 'Destroy Infrastructure' && params.DESTROY_CONFIRMATION != 'destroy') {
+                        error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
+                    }
+                }
+            }
+        }
+
+        stage('Execute Action') {
             steps {
                 script {
                     switch(params.ACTION) {
@@ -246,6 +267,25 @@ pipeline {
     post {
         always {
             cleanWs()
+        }
+        success {
+            echo "Pipeline completed successfully"
+            script {
+                // Suggest next steps based on completed action
+                switch(params.ACTION) {
+                    case 'Infrastructure Bootstrapping':
+                        echo "✅ Infrastructure created successfully! Next steps:"
+                        echo "1. Run again with ACTION = 'Infrastructure Configuration'"
+                        echo "2. Then run with ACTION = 'Application Deployment'"
+                        break
+                    case 'Start Server':
+                        echo "✅ Server started successfully! Next steps:"
+                        echo "1. Run with ACTION = 'Infrastructure Configuration' if needed"
+                        echo "2. Run with ACTION = 'Application Deployment' if needed"
+                        echo "3. View server addresses with ACTION = 'Display Addresses'"
+                        break
+                }
+            }
         }
     }
 }
