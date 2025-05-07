@@ -5,26 +5,17 @@ pipeline {
         pollSCM('*/5 * * * *')
     }
     
-    // Use properties block for dynamic parameters
-    options {
-        // Disable concurrent builds to avoid race conditions with parameter updates
-        disableConcurrentBuilds()
+    // Define base parameters
+    parameters {
+        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
+        string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
+        string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
     }
     
     stages {
-        stage('Setup Parameters') {
+        stage('Active Parameter Detection') {
             steps {
                 script {
-                    properties([
-                        parameters([
-                            string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)'),
-                            string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.'),
-                            string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image'),
-                            // This is a special parameter that triggers the autodetection
-                            string(name: '_DETECT_INFRA', defaultValue: "${currentBuild.number}", description: 'Internal parameter for infrastructure detection')
-                        ])
-                    ])
-                    
                     // Set AWS region for commands
                     env.AWS_DEFAULT_REGION = params.AWS_REGION
                     
@@ -87,7 +78,7 @@ pipeline {
                         instancesStopped = false
                     }
                     
-                    // Dynamic ACTION choices based on infrastructure state
+                    // Generate the action choices HTML
                     def actionChoices = []
                     
                     // Always available
@@ -110,42 +101,154 @@ pipeline {
                         }
                     }
                     
-                    // Additional parameters based on selected actions
-                    def dynamicParams = []
+                    // Store the current state in environment variables
+                    env.TERRAFORM_STATE_EXISTS = terraformStateExists.toString()
+                    env.INSTANCES_RUNNING = instancesRunning.toString()
+                    env.INSTANCES_STOPPED = instancesStopped.toString()
                     
-                    // Always include the base parameters
-                    dynamicParams.add(string(name: 'AWS_REGION', defaultValue: params.AWS_REGION, 
-                                           description: 'AWS region to use (e.g., eu-west-1)'))
-                    dynamicParams.add(string(name: 'LOG_LEVEL', defaultValue: params.LOG_LEVEL, 
-                                          description: 'Log detail level: INFO or DEBUG. Defaults to INFO.'))
-                    dynamicParams.add(string(name: 'CLUSTER_VERSION', defaultValue: params.CLUSTER_VERSION, 
-                                          description: 'Cluster version for naocloud image'))
+                    // Create the Active Choice Parameter script that will be used for the ACTION parameter
+                    def activeChoiceScript = """
+                        import hudson.model.*;
+                        import jenkins.model.*;
+                        
+                        def actions = []
+                        
+                        boolean terraformStateExists = Boolean.parseBoolean(System.getenv('TERRAFORM_STATE_EXISTS') ?: 'false')
+                        boolean instancesRunning = Boolean.parseBoolean(System.getenv('INSTANCES_RUNNING') ?: 'false')
+                        boolean instancesStopped = Boolean.parseBoolean(System.getenv('INSTANCES_STOPPED') ?: 'false')
+                        
+                        // Build choices based on infrastructure state
+                        if (!terraformStateExists) {
+                            actions.add("Infrastructure Bootstrapping")
+                        } else {
+                            actions.add("Infrastructure Configuration")
+                            actions.add("Application Deployment")
+                            actions.add("Destroy Infrastructure")
+                            
+                            if (instancesRunning) {
+                                actions.add("Stop running Server")
+                                actions.add("Display Addresses")
+                            }
+                            
+                            if (instancesStopped) {
+                                actions.add("Start Server")
+                            }
+                        }
+                        
+                        return actions
+                    """
                     
-                    // Add dynamic ACTION parameter
-                    dynamicParams.add(choice(name: 'ACTION', choices: actionChoices, 
-                                          description: 'Select an action to perform on the cloud infrastructure'))
+                    // Create a Groovy script file for the Active Choice Parameter
+                    writeFile file: 'actionChoices.groovy', text: activeChoiceScript
                     
-                    // Add confirmation for destroy
+                    // Create a file with required properties to help the UI
+                    def stateProperties = """
+                        terraformStateExists=${terraformStateExists}
+                        instancesRunning=${instancesRunning}
+                        instancesStopped=${instancesStopped}
+                        availableActions=${actionChoices.join(',')}
+                    """
+                    writeFile file: 'infrastructure_state.properties', text: stateProperties
+                    
+                    // Create HTML output to show available actions
+                    def htmlContent = """
+                        <h3>Available Actions Based on Current Infrastructure State:</h3>
+                        <ul>
+                    """
+                    
+                    actionChoices.each { action ->
+                        htmlContent += "<li>${action}</li>"
+                    }
+                    
+                    htmlContent += """
+                        </ul>
+                        <p><b>Please select an action from the dropdown below:</b></p>
+                    """
+                    
+                    // Display the HTML content
+                    echo htmlContent
+                    
+                    // Save the action choices for later usage
+                    env.ACTION_CHOICES = actionChoices.join(',')
+                    
+                    // Create prompt for ACTION using a dynamically generated dropdown
+                    def actionOptions = []
+                    actionChoices.each { choice ->
+                        actionOptions.add("<option value=\"${choice}\">${choice}</option>")
+                    }
+                    
+                    def actionDropdown = """
+                        <select name="ACTION" id="action-select">
+                            ${actionOptions.join('')}
+                        </select>
+                    """
+                    
+                    // Create the destroy confirmation input if needed
+                    def destroyConfirmation = ""
                     if (actionChoices.contains("Destroy Infrastructure")) {
-                        dynamicParams.add(string(name: 'DESTROY_CONFIRMATION', defaultValue: '', 
-                                              description: 'Type "destroy" to confirm deletion of the cloud environment'))
+                        destroyConfirmation = """
+                            <div id="destroy-confirmation" style="display:none; margin-top: 10px;">
+                                <label for="destroy-input">Type "destroy" to confirm deletion:</label>
+                                <input type="text" id="destroy-input" name="DESTROY_CONFIRMATION">
+                            </div>
+                            <script>
+                                document.getElementById('action-select').addEventListener('change', function() {
+                                    var destroyConfirmation = document.getElementById('destroy-confirmation');
+                                    if (this.value === 'Destroy Infrastructure') {
+                                        destroyConfirmation.style.display = 'block';
+                                    } else {
+                                        destroyConfirmation.style.display = 'none';
+                                    }
+                                });
+                            </script>
+                        """
                     }
                     
-                    // Add hidden parameter for infra detection
-                    dynamicParams.add(string(name: '_DETECT_INFRA', defaultValue: "${currentBuild.number}", 
-                                            description: 'Internal parameter for infrastructure detection'))
+                    // Build a custom input form
+                    def customForm = """
+                        <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+                            <h2>Cloud Infrastructure Management</h2>
+                            
+                            <div style="margin-bottom: 10px;">
+                                <label for="action-select"><b>Select an action:</b></label><br>
+                                ${actionDropdown}
+                            </div>
+                            
+                            ${destroyConfirmation}
+                            
+                            <div style="margin-top: 20px;">
+                                <input type="submit" value="Execute Action" style="background-color: #0066cc; color: white; padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer;">
+                            </div>
+                        </div>
+                    """
                     
-                    // Update the build with dynamic parameters
-                    properties([
-                        parameters(dynamicParams)
-                    ])
+                    // In a real Jenkins environment, this would use the input step
+                    // For now, just display the form and simulate user input
                     
-                    // If this is the first run (parameters being set), abort the build and ask user to run again with parameters
-                    if (currentBuild.number == 1 || !params.containsKey('ACTION')) {
-                        currentBuild.description = "Infrastructure detection complete. Please run the build with your selected action."
-                        currentBuild.result = 'ABORTED'
-                        error("Infrastructure state detected. Please select an action from the parameters and run the build again.")
+                    // Check if the ACTION parameter is set
+                    if (!params.containsKey('ACTION') || params.ACTION == null || params.ACTION.trim() == '') {
+                        // If no ACTION is specified, show the form and wait for user input
+                        def result = input(
+                            id: 'userInput',
+                            message: 'Select an action to perform',
+                            parameters: [
+                                choice(name: 'ACTION', choices: actionChoices, description: 'Select an action to perform on the cloud infrastructure')
+                            ]
+                        )
+                        
+                        // Store the ACTION for use in subsequent stages
+                        env.ACTION = result.ACTION
+                    } else {
+                        // Use the provided ACTION parameter
+                        env.ACTION = params.ACTION
                     }
+                    
+                    // Validate if the action is still valid in the current state
+                    if (!actionChoices.contains(env.ACTION)) {
+                        error("Selected action '${env.ACTION}' is not valid in the current infrastructure state. Please select from: ${actionChoices.join(', ')}")
+                    }
+                    
+                    echo "Proceeding with action: ${env.ACTION}"
                 }
             }
         }
@@ -153,12 +256,22 @@ pipeline {
         stage('Parameter Validation') {
             steps {
                 script {
-                    echo "Validating parameters for action: ${params.ACTION}"
-                    
                     // Validate destroy confirmation
-                    if (params.ACTION == "Destroy Infrastructure" && 
-                        (!params.containsKey('DESTROY_CONFIRMATION') || params.DESTROY_CONFIRMATION != 'destroy')) {
-                        error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
+                    if (env.ACTION == "Destroy Infrastructure") {
+                        // Get the destroy confirmation if not provided
+                        if (!params.containsKey('DESTROY_CONFIRMATION') || params.DESTROY_CONFIRMATION != 'destroy') {
+                            def destroyConfirm = input(
+                                id: 'destroyConfirm',
+                                message: 'Type "destroy" to confirm deletion of the cloud environment',
+                                parameters: [
+                                    string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
+                                ]
+                            )
+                            
+                            if (destroyConfirm.DESTROY_CONFIRMATION != 'destroy') {
+                                error("❌ Destroy confirmation not provided. You must type 'destroy' to proceed with infrastructure deletion.")
+                            }
+                        }
                     }
                 }
             }
@@ -166,7 +279,7 @@ pipeline {
 
         stage('Infrastructure Bootstrapping') {
             when {
-                expression { params.ACTION == "Infrastructure Bootstrapping" }
+                expression { env.ACTION == "Infrastructure Bootstrapping" }
             }
             steps {
                 dir("/workspace/aws") {
@@ -179,7 +292,7 @@ pipeline {
         
         stage('Infrastructure Configuration') {
             when {
-                expression { params.ACTION == "Infrastructure Configuration" }
+                expression { env.ACTION == "Infrastructure Configuration" }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -204,7 +317,7 @@ pipeline {
         
         stage('Application Deployment') {
             when {
-                expression { params.ACTION == "Application Deployment" }
+                expression { env.ACTION == "Application Deployment" }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -219,7 +332,7 @@ pipeline {
         
         stage('Stop Server') {
             when {
-                expression { params.ACTION == "Stop running Server" }
+                expression { env.ACTION == "Stop running Server" }
             }
             steps {
                 sh '''
@@ -245,7 +358,7 @@ pipeline {
         
         stage('Start Server') {
             when {
-                expression { params.ACTION == "Start Server" }
+                expression { env.ACTION == "Start Server" }
             }
             steps {
                 sh '''
@@ -271,10 +384,7 @@ pipeline {
         
         stage('Destroy Infrastructure') {
             when {
-                allOf {
-                    expression { params.ACTION == "Destroy Infrastructure" }
-                    expression { params.DESTROY_CONFIRMATION == 'destroy' }
-                }
+                expression { env.ACTION == "Destroy Infrastructure" }
             }
             steps {
                 dir("/workspace/aws") {
@@ -285,7 +395,7 @@ pipeline {
         
         stage('Display addresses of the server') {
             when {
-                expression { params.ACTION == "Display Addresses" }
+                expression { env.ACTION == "Display Addresses" }
             }
             steps {
                 sh '''
