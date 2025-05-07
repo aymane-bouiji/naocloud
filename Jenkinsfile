@@ -5,30 +5,42 @@ pipeline {
         pollSCM('*/5 * * * *')
     }
     
-    // Instead of static parameters, we'll use a script to determine parameters
-    // based on infrastructure state
-    options {
-        // This allows parameters to be provided dynamically
-        parameters([
-            string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)'),
-            string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.'),
-            string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
-        ])
+    // Define minimal initial parameters
+    parameters {
+        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
+        string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
+        string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
+        // Dynamic parameter placeholder - real options will be set in first stage
+        choice(name: 'ACTION', choices: ['Detect Infrastructure State'], description: 'Select an action to perform on the cloud infrastructure')
     }
     
     stages {
-        // First stage to determine infrastructure state and set properties
         stage('Detect Infrastructure State') {
+            when {
+                // Only run detection when ACTION is set to default
+                expression { params.ACTION == 'Detect Infrastructure State' }
+            }
             steps {
                 script {
-                    // Set default AWS region for commands
+                    // Set AWS region for commands
                     env.AWS_DEFAULT_REGION = params.AWS_REGION
                     
+                    echo "Detecting infrastructure state..."
+                    
                     // Check for existing infrastructure by looking for terraform state
-                    def terraformStateExists = fileExists('/workspace/aws/.terraform')
+                    def terraformStateExists = false
+                    try {
+                        dir("/workspace/aws") {
+                            terraformStateExists = sh(
+                                script: 'test -d .terraform && echo "true" || echo "false"', 
+                                returnStdout: true
+                            ).trim() == "true" || fileExists('/workspace/aws/terraform.tfstate')
+                        }
+                    } catch (Exception e) {
+                        echo "Error checking terraform state: ${e.message}"
+                    }
                     
                     // Determine if instances exist and their state
-                    def instancesExist = false
                     def instancesRunning = false
                     def instancesStopped = false
                     
@@ -40,7 +52,7 @@ pipeline {
                                 --filters "Name=tag:Name,Values=master_instance,worker_instance" \
                                 "Name=instance-state-name,Values=running,pending" \
                                 --query "length(Reservations[].Instances[])" \
-                                --output text
+                                --output text || echo "0"
                             ''',
                             returnStdout: true
                         ).trim()
@@ -52,7 +64,7 @@ pipeline {
                                 --filters "Name=tag:Name,Values=master_instance,worker_instance" \
                                 "Name=instance-state-name,Values=stopped" \
                                 --query "length(Reservations[].Instances[])" \
-                                --output text
+                                --output text || echo "0"
                             ''',
                             returnStdout: true
                         ).trim()
@@ -60,134 +72,87 @@ pipeline {
                         // Set state flags
                         instancesRunning = runningInstances != '0' && runningInstances != ''
                         instancesStopped = stoppedInstances != '0' && stoppedInstances != ''
-                        instancesExist = instancesRunning || instancesStopped
                         
                         echo "Infrastructure state detected:"
                         echo "- Terraform state exists: ${terraformStateExists}"
-                        echo "- Instances exist: ${instancesExist}"
                         echo "- Running instances: ${instancesRunning}"
                         echo "- Stopped instances: ${instancesStopped}"
                     } catch (Exception e) {
-                        echo "Error detecting infrastructure state: ${e.message}"
+                        echo "Error detecting instance state: ${e.message}"
                         // If we can't determine state, assume nothing exists
-                        instancesExist = false
                         instancesRunning = false
                         instancesStopped = false
                     }
                     
-                    // Set parameters based on the current state
-                    def parameters = []
+                    // Dynamic ACTION choices based on infrastructure state
+                    def actionChoices = []
                     
-                    // Always add the basic parameters
-                    parameters.add(string(name: 'AWS_REGION', defaultValue: params.AWS_REGION ?: 'eu-west-1', 
-                                        description: 'AWS region to use (e.g., eu-west-1)'))
-                    parameters.add(string(name: 'LOG_LEVEL', defaultValue: params.LOG_LEVEL ?: 'INFO', 
-                                        description: 'Log detail level: INFO or DEBUG. Defaults to INFO.'))
-                    parameters.add(string(name: 'CLUSTER_VERSION', defaultValue: params.CLUSTER_VERSION ?: '23.09', 
-                                        description: 'Cluster version for naocloud image'))
-                    
-                    // Add conditional parameters based on state
-                    if (!instancesExist) {
-                        // If no infrastructure exists, only allow bootstrapping
-                        parameters.add(booleanParam(name: 'Infrastructure_Bootstrapping', defaultValue: false, 
-                                                 description: 'Set up and create the cloud environment'))
+                    // Always available
+                    if (!terraformStateExists) {
+                        actionChoices.add("Infrastructure Bootstrapping")
                     } else {
-                        // If infrastructure exists, allow configuration and deployment
-                        parameters.add(booleanParam(name: 'Infrastructure_Configuration', defaultValue: false, 
-                                                 description: 'Configure the cloud setup and manage Application images'))
-                        parameters.add(booleanParam(name: 'Application_Deployment', defaultValue: false, 
-                                                 description: 'Deploy applications to the cloud'))
+                        // If infrastructure exists
+                        actionChoices.add("Infrastructure Configuration")
+                        actionChoices.add("Application Deployment")
+                        actionChoices.add("Destroy Infrastructure")
                         
-                        // Allow destruction of existing infrastructure
-                        parameters.add(booleanParam(name: 'Destroy_Infrastructure', defaultValue: false, 
-                                                 description: 'Delete the entire cloud environment'))
-                        parameters.add(string(name: 'DESTROY_CONFIRMATION', defaultValue: '', 
-                                           description: 'Type "destroy" to confirm deletion of the cloud environment'))
-                        
-                        // Display addresses only if instances are running
+                        // Instance specific actions
                         if (instancesRunning) {
-                            parameters.add(booleanParam(name: 'Display_Addresses', defaultValue: false, 
-                                                     description: 'Display addresses of running server'))
-                            parameters.add(booleanParam(name: 'Stop_running_Server', defaultValue: false, 
-                                                     description: 'Pause (stop) the server'))
+                            actionChoices.add("Stop running Server")
+                            actionChoices.add("Display Addresses")
                         }
                         
-                        // Allow starting servers only if stopped instances exist
                         if (instancesStopped) {
-                            parameters.add(booleanParam(name: 'Start_Server', defaultValue: false, 
-                                                     description: 'Start the stopped server'))
+                            actionChoices.add("Start Server")
                         }
                     }
                     
-                    // Update the build with the new parameters
+                    // Additional parameters based on selected actions
+                    def dynamicParams = []
+                    
+                    // Always include the base parameters
+                    dynamicParams.add(string(name: 'AWS_REGION', defaultValue: params.AWS_REGION, 
+                                           description: 'AWS region to use (e.g., eu-west-1)'))
+                    dynamicParams.add(string(name: 'LOG_LEVEL', defaultValue: params.LOG_LEVEL, 
+                                          description: 'Log detail level: INFO or DEBUG. Defaults to INFO.'))
+                    dynamicParams.add(string(name: 'CLUSTER_VERSION', defaultValue: params.CLUSTER_VERSION, 
+                                          description: 'Cluster version for naocloud image'))
+                    
+                    // Add dynamic ACTION parameter
+                    dynamicParams.add(choice(name: 'ACTION', choices: actionChoices, 
+                                          description: 'Select an action to perform on the cloud infrastructure'))
+                    
+                    // Add confirmation for destroy
+                    if (actionChoices.contains("Destroy Infrastructure")) {
+                        dynamicParams.add(string(name: 'DESTROY_CONFIRMATION', defaultValue: '', 
+                                               description: 'Type "destroy" to confirm deletion of the cloud environment'))
+                    }
+                    
+                    // Update the build with dynamic parameters
                     properties([
-                        parameters(parameters)
+                        parameters(dynamicParams)
                     ])
                     
-                    // If this is a parameterized build, proceed; otherwise, prompt for parameters
-                    if (currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')) {
-                        echo "Build triggered by user, checking parameters..."
-                    } else {
-                        echo "Build triggered automatically, prompting for parameters..."
-                        // This will halt the pipeline and prompt for parameters
-                        currentBuild.result = 'ABORTED'
-                        error("Build requires parameters, please provide them.")
-                    }
+                    // Abort the current build to force the user to submit with new parameters
+                    currentBuild.description = "Infrastructure detection complete. Please run the build again with your selected action."
+                    currentBuild.result = 'ABORTED'
+                    error("Infrastructure state detected. Please run the build again to select an action.")
                 }
             }
         }
         
         stage('Parameter Validation') {
+            when {
+                expression { params.ACTION != 'Detect Infrastructure State' }
+            }
             steps {
                 script {
-                    echo "Validating parameters..."
+                    echo "Validating parameters for action: ${params.ACTION}"
                     
-                    // Contradictory actions
-                    if (params.containsKey('Start_Server') && params.containsKey('Stop_running_Server') && 
-                        params['Start_Server'] && params['Stop_running_Server']) {
-                        error("❌ You cannot start and stop the server at the same time. Please select only one.")
-                    }
-
-                    if (params.containsKey('Infrastructure_Bootstrapping') && params.containsKey('Destroy_Infrastructure') && 
-                        params['Infrastructure_Bootstrapping'] && params['Destroy_Infrastructure']) {
-                        error("❌ You cannot bootstrap and destroy infrastructure at the same time. Please select only one.")
-                    }
-
-                    if (params.containsKey('Destroy_Infrastructure') && params['Destroy_Infrastructure']) {
-                        // Check other conflicting actions
-                        def conflictingActions = []
-                        if (params.containsKey('Infrastructure_Configuration') && params['Infrastructure_Configuration']) 
-                            conflictingActions.add('Infrastructure Configuration')
-                        if (params.containsKey('Application_Deployment') && params['Application_Deployment']) 
-                            conflictingActions.add('Application Deployment')
-                        if (params.containsKey('Start_Server') && params['Start_Server']) 
-                            conflictingActions.add('Start Server')
-                        if (params.containsKey('Stop_running_Server') && params['Stop_running_Server']) 
-                            conflictingActions.add('Stop running Server')
-                        if (params.containsKey('Display_Addresses') && params['Display_Addresses']) 
-                            conflictingActions.add('Display Addresses')
-                        
-                        if (conflictingActions.size() > 0) {
-                            error("❌ Cannot perform other actions while destroying infrastructure. Conflicting actions: ${conflictingActions.join(', ')}")
-                        }
-
-                        // Verify destruction confirmation
-                        if (!params.containsKey('DESTROY_CONFIRMATION') || params.DESTROY_CONFIRMATION != 'destroy') {
-                            error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
-                        }
-                    }
-
-                    // Check if at least one action is selected
-                    def anyActionSelected = false
-                    ['Infrastructure_Bootstrapping', 'Infrastructure_Configuration', 'Application_Deployment', 
-                     'Destroy_Infrastructure', 'Start_Server', 'Stop_running_Server', 'Display_Addresses'].each { action ->
-                        if (params.containsKey(action) && params[action]) {
-                            anyActionSelected = true
-                        }
-                    }
-                    
-                    if (!anyActionSelected) {
-                        error("⚠️ No action selected. Please choose at least one operation.")
+                    // Validate destroy confirmation
+                    if (params.ACTION == "Destroy Infrastructure" && 
+                        (!params.containsKey('DESTROY_CONFIRMATION') || params.DESTROY_CONFIRMATION != 'destroy')) {
+                        error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
                     }
                 }
             }
@@ -195,7 +160,7 @@ pipeline {
 
         stage('Infrastructure Bootstrapping') {
             when {
-                expression { params.containsKey('Infrastructure_Bootstrapping') && params['Infrastructure_Bootstrapping'] }
+                expression { params.ACTION == "Infrastructure Bootstrapping" }
             }
             steps {
                 dir("/workspace/aws") {
@@ -208,7 +173,7 @@ pipeline {
         
         stage('Infrastructure Configuration') {
             when {
-                expression { params.containsKey('Infrastructure_Configuration') && params['Infrastructure_Configuration'] }
+                expression { params.ACTION == "Infrastructure Configuration" }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -233,7 +198,7 @@ pipeline {
         
         stage('Application Deployment') {
             when {
-                expression { params.containsKey('Application_Deployment') && params['Application_Deployment'] }
+                expression { params.ACTION == "Application Deployment" }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -248,7 +213,7 @@ pipeline {
         
         stage('Stop Server') {
             when {
-                expression { params.containsKey('Stop_running_Server') && params['Stop_running_Server'] }
+                expression { params.ACTION == "Stop running Server" }
             }
             steps {
                 sh '''
@@ -274,7 +239,7 @@ pipeline {
         
         stage('Start Server') {
             when {
-                expression { params.containsKey('Start_Server') && params['Start_Server'] }
+                expression { params.ACTION == "Start Server" }
             }
             steps {
                 sh '''
@@ -301,8 +266,8 @@ pipeline {
         stage('Destroy Infrastructure') {
             when {
                 allOf {
-                    expression { params.containsKey('Destroy_Infrastructure') && params['Destroy_Infrastructure'] }
-                    expression { params.containsKey('DESTROY_CONFIRMATION') && params.DESTROY_CONFIRMATION == 'destroy' }
+                    expression { params.ACTION == "Destroy Infrastructure" }
+                    expression { params.DESTROY_CONFIRMATION == 'destroy' }
                 }
             }
             steps {
@@ -314,7 +279,7 @@ pipeline {
         
         stage('Display addresses of the server') {
             when {
-                expression { params.containsKey('Display_Addresses') && params['Display_Addresses'] }
+                expression { params.ACTION == "Display Addresses" }
             }
             steps {
                 sh '''
