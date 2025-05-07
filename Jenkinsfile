@@ -5,23 +5,26 @@ pipeline {
         pollSCM('*/5 * * * *')
     }
     
-    // Define minimal initial parameters
-    parameters {
-        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
-        string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
-        string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
-        // Dynamic parameter placeholder - real options will be set in first stage
-        choice(name: 'ACTION', choices: ['Detect Infrastructure State'], description: 'Select an action to perform on the cloud infrastructure')
+    // Use properties block for dynamic parameters
+    options {
+        // Disable concurrent builds to avoid race conditions with parameter updates
+        disableConcurrentBuilds()
     }
     
     stages {
-        stage('Detect Infrastructure State') {
-            when {
-                // Only run detection when ACTION is set to default
-                expression { params.ACTION == 'Detect Infrastructure State' }
-            }
+        stage('Setup Parameters') {
             steps {
                 script {
+                    properties([
+                        parameters([
+                            string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)'),
+                            string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.'),
+                            string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image'),
+                            // This is a special parameter that triggers the autodetection
+                            string(name: '_DETECT_INFRA', defaultValue: "${currentBuild.number}", description: 'Internal parameter for infrastructure detection')
+                        ])
+                    ])
+                    
                     // Set AWS region for commands
                     env.AWS_DEFAULT_REGION = params.AWS_REGION
                     
@@ -125,26 +128,29 @@ pipeline {
                     // Add confirmation for destroy
                     if (actionChoices.contains("Destroy Infrastructure")) {
                         dynamicParams.add(string(name: 'DESTROY_CONFIRMATION', defaultValue: '', 
-                                               description: 'Type "destroy" to confirm deletion of the cloud environment'))
+                                              description: 'Type "destroy" to confirm deletion of the cloud environment'))
                     }
+                    
+                    // Add hidden parameter for infra detection
+                    dynamicParams.add(string(name: '_DETECT_INFRA', defaultValue: "${currentBuild.number}", 
+                                            description: 'Internal parameter for infrastructure detection'))
                     
                     // Update the build with dynamic parameters
                     properties([
                         parameters(dynamicParams)
                     ])
                     
-                    // Abort the current build to force the user to submit with new parameters
-                    currentBuild.description = "Infrastructure detection complete. Please run the build again with your selected action."
-                    currentBuild.result = 'ABORTED'
-                    error("Infrastructure state detected. Please run the build again to select an action.")
+                    // If this is the first run (parameters being set), abort the build and ask user to run again with parameters
+                    if (currentBuild.number == 1 || !params.containsKey('ACTION')) {
+                        currentBuild.description = "Infrastructure detection complete. Please run the build with your selected action."
+                        currentBuild.result = 'ABORTED'
+                        error("Infrastructure state detected. Please select an action from the parameters and run the build again.")
+                    }
                 }
             }
         }
         
         stage('Parameter Validation') {
-            when {
-                expression { params.ACTION != 'Detect Infrastructure State' }
-            }
             steps {
                 script {
                     echo "Validating parameters for action: ${params.ACTION}"
