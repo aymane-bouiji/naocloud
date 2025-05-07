@@ -3,10 +3,6 @@ pipeline {
     triggers {
         pollSCM('*/5 * * * *')
     }
-    environment {
-        AWS_ACCESS_KEY_ID = credentials('aws-credentials')
-        AWS_SECRET_ACCESS_KEY = credentials('aws-credentials')
-    }
     parameters {
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
@@ -30,18 +26,19 @@ pipeline {
                             def accessKey = System.getenv('AWS_ACCESS_KEY_ID')
                             def secretKey = System.getenv('AWS_SECRET_ACCESS_KEY')
                             if (!accessKey || !secretKey) {
-                                println "Error: AWS credentials not found in environment"
+                                println "Error: AWS credentials not found in environment variables"
                                 return ['No actions available']
                             }
-                            println "AWS credentials found"
+                            println "AWS credentials found: ACCESS_KEY_ID=${accessKey.substring(0,4)}..."
 
                             // Check running instances
                             def runningInstances = []
                             try {
                                 def cmd = "aws ec2 describe-instances --region ${awsRegion} --filters \\"Name=tag:Name,Values=master_instance,worker_instance\\" \\"Name=instance-state-name,Values=running,pending\\" --query \\"Reservations[].Instances[].InstanceId\\" --output text"
+                                println "Executing command: ${cmd}"
                                 def result = cmd.execute().text.trim()
                                 runningInstances = result ? result.split('\n') : []
-                                println "Running instances: ${runningInstances}"
+                                println "Running instances found: ${runningInstances}"
                             } catch (Exception e) {
                                 println "Error checking running instances: ${e.message}"
                             }
@@ -50,9 +47,10 @@ pipeline {
                             def stoppedInstances = []
                             try {
                                 def cmd = "aws ec2 describe-instances --region ${awsRegion} --filters \\"Name=tag:Name,Values=master_instance,worker_instance\\" \\"Name=instance-state-name,Values=stopped\\" --query \\"Reservations[].Instances[].InstanceId\\" --output text"
+                                println "Executing command: ${cmd}"
                                 def result = cmd.execute().text.trim()
                                 stoppedInstances = result ? result.split('\n') : []
-                                println "Stopped instances: ${stoppedInstances}"
+                                println "Stopped instances found: ${stoppedInstances}"
                             } catch (Exception e) {
                                 println "Error checking stopped instances: ${e.message}"
                             }
@@ -231,7 +229,9 @@ pipeline {
     }
     post {
         always {
-            cleanWs()
+            node('') {
+                cleanWs()
+            }
         }
     }
 }
