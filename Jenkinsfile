@@ -2,11 +2,11 @@ pipeline {
     agent any
     
     parameters {
-        choice(
-            name: 'ACTION',
-            choices: ['Infrastructure Configuration', 'Application Deployment', 'Stop running Server', 'Display Addresses', 'Destroy Infrastructure', 'Start Server'],
-            description: 'Select an action to perform on the cloud infrastructure'
-        )
+        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
+        string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
+        string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
+        // Hidden property that will be used to rebuild the job with current state
+        string(name: 'SERVER_STATE', defaultValue: '', description: 'Hidden property for server state tracking')
     }
     
     stages {
@@ -14,60 +14,133 @@ pipeline {
             steps {
                 sh '''
                     set +x
+                    export AWS_DEFAULT_REGION=${AWS_REGION}
                     echo "=== Checking Instance States ==="
                     
-                    # Get instance states directly from cloud provider
-                    # For AWS example:
-                    aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId,State.Name]' --output json > instance_states.json
+                    # Query master and worker instances
+                    MASTER_DATA=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=master_instance" \
+                        --query "Reservations[].Instances[].[InstanceId,State.Name]" \
+                        --output text 2>/tmp/aws_error.log || echo "")
+                    WORKER_DATA=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=worker_instance" \
+                        --query "Reservations[].Instances[].[InstanceId,State.Name]" \
+                        --output text 2>/tmp/aws_error.log || echo "")
                     
-                    # Parse the results and write to properties file
-                    python3 -c '
-import json
-import os
-
-# Read instance states
-with open("instance_states.json", "r") as f:
-    instances = json.load(f)
-
-# Check states
-has_instances = len(instances) > 0
-has_running = any(instance[1] == "running" for instance in instances)
-has_stopped = any(instance[1] == "stopped" for instance in instances)
-
-# Write to properties file
-with open("serverState.properties", "w") as f:
-    f.write(f"hasInstances={str(has_instances).lower()}\\n")
-    f.write(f"hasRunningInstances={str(has_running).lower()}\\n")
-    f.write(f"hasStoppedInstances={str(has_stopped).lower()}\\n")
-    
-    # Write instance details
-    if has_instances:
-        f.write("instanceIds=")
-        instance_ids = [instance[0] for instance in instances]
-        f.write(",".join(instance_ids) + "\\n")
-    '
+                    # Log any AWS CLI errors
+                    if [ -s /tmp/aws_error.log ]; then
+                        echo "AWS CLI errors:"
+                        cat /tmp/aws_error.log
+                    fi
+                    
+                    # Determine states
+                    echo "HAS_INSTANCES=false" > instance_states.properties
+                    echo "HAS_RUNNING=false" >> instance_states.properties
+                    echo "HAS_STOPPED=false" >> instance_states.properties
+                    
+                    if [ -n "$MASTER_DATA" ] || [ -n "$WORKER_DATA" ]; then
+                        echo "HAS_INSTANCES=true" > instance_states.properties
+                        if echo "$MASTER_DATA" | grep -q "running" || echo "$WORKER_DATA" | grep -q "running"; then
+                            echo "HAS_RUNNING=true" >> instance_states.properties
+                        fi
+                        if echo "$MASTER_DATA" | grep -q "stopped" || echo "$WORKER_DATA" | grep -q "stopped"; then
+                            echo "HAS_STOPPED=true" >> instance_states.properties
+                        fi
+                    fi
                     
                     echo "=== Instance States Saved ==="
                 '''
                 
                 script {
-                    // Load the properties file
-                    if (fileExists('serverState.properties')) {
-                        props = readProperties file: 'serverState.properties'
-                        echo "Current server state:"
-                        echo "- Has instances: ${props.hasInstances}"
-                        echo "- Has running instances: ${props.hasRunningInstances}"
-                        echo "- Has stopped instances: ${props.hasStoppedInstances}"
+                    def props = readProperties file: 'instance_states.properties'
+                    env.HAS_INSTANCES = props.HAS_INSTANCES
+                    env.HAS_RUNNING = props.HAS_RUNNING
+                    env.HAS_STOPPED = props.HAS_STOPPED
+                    
+                    // Generate available actions based on actual infrastructure state
+                    def availableActions = []
+                    
+                    if (env.HAS_INSTANCES == 'false') {
+                        availableActions.add("Infrastructure Bootstrapping")
+                    }
+                    if (env.HAS_RUNNING == 'true') {
+                        availableActions.add("Infrastructure Configuration")
+                        availableActions.add("Application Deployment")
+                        availableActions.add("Stop running Server")
+                        availableActions.add("Display Addresses")
+                    }
+                    if (env.HAS_STOPPED == 'true') {
+                        availableActions.add("Start Server")
+                    }
+                    if (env.HAS_INSTANCES == 'true') {
+                        availableActions.add("Destroy Infrastructure")
+                    }
+                    
+                    // If no actions determined, provide a fallback
+                    if (availableActions.isEmpty()) {
+                        availableActions.add("No valid actions available")
+                    }
+                    
+                    // Store the current state and available actions
+                    env.SERVER_STATE_CURRENT = "has_instances=${env.HAS_INSTANCES},has_running=${env.HAS_RUNNING},has_stopped=${env.HAS_STOPPED}"
+                    env.AVAILABLE_ACTIONS = availableActions.join(',')
+                    
+                    echo "Current server state: ${env.SERVER_STATE_CURRENT}"
+                    echo "Available actions: ${env.AVAILABLE_ACTIONS}"
+                    
+                    // Check if the job was rebuilt with accurate state
+                    if (params.SERVER_STATE != env.SERVER_STATE_CURRENT) {
+                        // First run or state changed, rebuild with current state
+                        echo "Server state changed or first run detected. Rebuilding job with updated state..."
                         
-                        // Store the properties in environment variables for later stages
-                        env.HAS_INSTANCES = props.hasInstances
-                        env.HAS_RUNNING_INSTANCES = props.hasRunningInstances
-                        env.HAS_STOPPED_INSTANCES = props.hasStoppedInstances
-                        if (props.instanceIds) {
-                            env.INSTANCE_IDS = props.instanceIds
+                        // Build the action parameter for the new build
+                        def actionParam = '''
+                            <input type="choice" name="ACTION" description="Select an action to perform">
+                        '''
+                        availableActions.each { action ->
+                            actionParam += "<option value=\"${action}\">${action}</option>"
                         }
+                        actionParam += '</input>'
+                        
+                        // Add destroy confirmation parameter conditionally
+                        def destroyParam = ''
+                        if (availableActions.contains("Destroy Infrastructure")) {
+                            destroyParam = '''
+                                <input type="string" name="DESTROY_CONFIRMATION" default="" 
+                                description="Type &quot;destroy&quot; to confirm deletion of the cloud environment (only required for Destroy Infrastructure)">
+                                </input>
+                            '''
+                        }
+                        
+                        // Rebuild with current parameters plus accurate state
+                        build job: env.JOB_NAME, parameters: [
+                            string(name: 'AWS_REGION', value: params.AWS_REGION),
+                            string(name: 'LOG_LEVEL', value: params.LOG_LEVEL),
+                            string(name: 'CLUSTER_VERSION', value: params.CLUSTER_VERSION),
+                            string(name: 'SERVER_STATE', value: env.SERVER_STATE_CURRENT),
+                            text(name: 'ACTION_CHOICES', value: actionParam),
+                            text(name: 'DESTROY_PARAM', value: destroyParam)
+                        ], wait: false
+                        
+                        // Abort the current build
+                        currentBuild.result = 'ABORTED'
+                        error("Rebuilding job with updated state...")
                     } else {
-                        error "Failed to create or read serverState.properties"
+                        echo "Server state unchanged. Continuing with execution..."
+                        
+                        // Dynamically create ACTION parameter
+                        if (!params.ACTION) {
+                            echo "ACTION parameter not set. Please select an action from the available options."
+                            currentBuild.result = 'ABORTED'
+                            error("ACTION parameter not set")
+                        }
+                        
+                        // Check if the selected action is valid
+                        if (!env.AVAILABLE_ACTIONS.split(',').contains(params.ACTION)) {
+                            echo "Selected action '${params.ACTION}' is not currently valid. Available actions: ${env.AVAILABLE_ACTIONS}"
+                            currentBuild.result = 'ABORTED'
+                            error("Invalid action selected")
+                        }
                     }
                 }
             }
@@ -77,174 +150,192 @@ with open("serverState.properties", "w") as f:
             steps {
                 sh '''
                     set +x
+                    export AWS_DEFAULT_REGION=${AWS_REGION}
                     echo "=== Server State ==="
-                    if [ "${HAS_INSTANCES}" = "true" ]; then
-                        echo "Instances found:"
-                        # For AWS example:
-                        aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId,State.Name,PublicIpAddress,Tags[?Key==`Name`].Value | [0]]' --output table
+                    
+                    echo "Master Instances:"
+                    MASTER_DATA=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=master_instance" \
+                        --query "Reservations[].Instances[].[InstanceId,State.Name]" \
+                        --output text)
+                    if [ -n "$MASTER_DATA" ]; then
+                        echo "$MASTER_DATA" | while read -r id state; do
+                            echo "  Instance ID: $id, State: $state"
+                        done
                     else
-                        echo "No instances found."
+                        echo "  No master instances found with tag Name=master_instance"
                     fi
+                    
+                    echo "Worker Instances:"
+                    WORKER_DATA=$(aws ec2 describe-instances \
+                        --filters "Name=tag:Name,Values=worker_instance" \
+                        --query "Reservations[].Instances[].[InstanceId,State.Name]" \
+                        --output text)
+                    if [ -n "$WORKER_DATA" ]; then
+                        echo "$WORKER_DATA" | while read -r id state; do
+                            echo "  Instance ID: $id, State: $state"
+                        done
+                    else
+                        echo "  No worker instances found with tag Name=worker_instance"
+                    fi
+                    
                     echo "==================="
                 '''
                 
                 script {
-                    def selectedAction = params.ACTION
-                    echo "Selected action: ${selectedAction}"
-                    
-                    // Determine valid actions based on server state
-                    def validActions = []
-                    if (env.HAS_RUNNING_INSTANCES == 'true') {
-                        validActions = ['Application Deployment', 'Stop running Server', 'Display Addresses', 'Destroy Infrastructure']
-                    } else if (env.HAS_STOPPED_INSTANCES == 'true') {
-                        validActions = ['Start Server', 'Destroy Infrastructure']
-                    } else {
-                        validActions = ['Infrastructure Configuration']
-                    }
-                    
-                    // Always allow Infrastructure Configuration if we want to create new instances
-                    if (!validActions.contains('Infrastructure Configuration')) {
-                        validActions.add('Infrastructure Configuration')
-                    }
-                    
-                    echo "Valid actions for current state:"
-                    validActions.each { action ->
+                    echo "Selected action: ${params.ACTION}"
+                    echo "Available actions based on current state:"
+                    env.AVAILABLE_ACTIONS.split(',').each { action ->
                         echo "- ${action}"
                     }
-                    
-                    // Validate selected action
-                    if (!selectedAction || !validActions.contains(selectedAction)) {
-                        error "❌ The selected action '${selectedAction}' is not valid for the current server state. Please select one of: ${validActions.join(', ')}"
-                    }
-                    
-                    // Store valid actions for later stages
-                    env.VALID_ACTIONS = validActions.join(',')
                 }
             }
         }
-        
+
         stage('Parameter Validation') {
             steps {
                 script {
-                    echo "Validating parameters for action: ${params.ACTION}"
-                    
-                    // Specific validations for each action type
-                    switch(params.ACTION) {
-                        case 'Infrastructure Configuration':
-                            // No additional parameters needed
-                            break
-                            
-                        case 'Application Deployment':
-                            if (env.HAS_RUNNING_INSTANCES != 'true') {
-                                error "Cannot deploy application: No running instances available"
-                            }
-                            break
-                            
-                        case 'Stop running Server':
-                            if (env.HAS_RUNNING_INSTANCES != 'true') {
-                                error "Cannot stop server: No running instances available"
-                            }
-                            break
-                            
-                        case 'Start Server':
-                            if (env.HAS_STOPPED_INSTANCES != 'true') {
-                                error "Cannot start server: No stopped instances available"
-                            }
-                            break
-                            
-                        case 'Display Addresses':
-                            if (env.HAS_RUNNING_INSTANCES != 'true') {
-                                error "Cannot display addresses: No running instances available"
-                            }
-                            break
-                            
-                        case 'Destroy Infrastructure':
-                            if (env.HAS_INSTANCES != 'true') {
-                                error "Cannot destroy infrastructure: No instances available"
-                            }
-                            break
-                            
-                        default:
-                            error "Unknown action: ${params.ACTION}"
+                    if (params.ACTION == 'Infrastructure Bootstrapping' && env.HAS_INSTANCES == 'true') {
+                        error("❌ Cannot bootstrap infrastructure when instances already exist. Consider using Destroy Infrastructure first.")
+                    }
+                    if (params.ACTION == 'Start Server' && env.HAS_STOPPED != 'true') {
+                        error("❌ No stopped instances found to start.")
+                    }
+                    if (params.ACTION == 'Stop running Server' && env.HAS_RUNNING != 'true') {
+                        error("❌ No running instances found to stop.")
+                    }
+                    if ((params.ACTION == 'Infrastructure Configuration' || 
+                         params.ACTION == 'Application Deployment' || 
+                         params.ACTION == 'Display Addresses') && 
+                        env.HAS_RUNNING != 'true') {
+                        error("❌ This action requires running instances. Please start the server first.")
+                    }
+                    if (params.ACTION == 'Destroy Infrastructure' && params.DESTROY_CONFIRMATION != 'destroy') {
+                        error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
+                    }
+                    if (params.ACTION == 'No valid actions available' || params.ACTION == 'Error: Script execution failed') {
+                        error("❌ Invalid action selected: ${params.ACTION}. Check instance states and try again.")
                     }
                 }
             }
         }
-        
+
         stage('Execute Action') {
             steps {
                 script {
-                    echo "Executing action: ${params.ACTION}"
-                    
                     switch(params.ACTION) {
+                        case 'Infrastructure Bootstrapping':
+                            dir("/workspace/aws") {
+                                sh 'terraform init'
+                                sh 'terraform plan -out=tfplan'
+                                sh 'terraform apply -auto-approve tfplan'
+                            }
+                            break
+                        
                         case 'Infrastructure Configuration':
-                            sh '''
-                                set +x
-                                echo "=== Creating Infrastructure ==="
-                                # Your infrastructure creation script (Terraform, CloudFormation, etc.)
-                                # Example for AWS using CloudFormation:
-                                # aws cloudformation create-stack --stack-name my-stack --template-body file://template.yaml
-                                echo "=== Infrastructure Created ==="
-                            '''
+                            dir("/workspace/ansible") {
+                                sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
+                                sh """
+                                    ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
+                                        --private-key=/workspace/aws/id_rsa \
+                                        -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\"
+                                """
+                                sh """
+                                    ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
+                                        --private-key=/workspace/aws/id_rsa \
+                                        -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
+                                        -e \"naocloud_tag=${params.CLUSTER_VERSION}\" \
+                                        -e \"naogizmo_tag=${params.CLUSTER_VERSION}\"
+                                """
+                            }
                             break
-                            
+                        
                         case 'Application Deployment':
-                            sh '''
-                                set +x
-                                echo "=== Deploying Application ==="
-                                # Your application deployment script
-                                # Example: SSH into instances and deploy
-                                for INSTANCE_ID in ${INSTANCE_IDS//,/ }; do
-                                    IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query 'Reservations[].Instances[].PublicIpAddress' --output text)
-                                    echo "Deploying to $IP..."
-                                    # ssh -i key.pem ec2-user@$IP "cd /app && git pull && docker-compose up -d"
-                                done
-                                echo "=== Application Deployed ==="
-                            '''
+                            dir("/workspace/ansible") {
+                                sh """
+                                    ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
+                                        --private-key=/workspace/aws/id_rsa \
+                                        -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\"
+                                """
+                            }
                             break
-                            
+                        
                         case 'Stop running Server':
                             sh '''
-                                set +x
-                                echo "=== Stopping Servers ==="
-                                # Get running instance IDs and stop them
-                                aws ec2 stop-instances --instance-ids ${INSTANCE_IDS//,/ }
-                                echo "=== Servers Stopped ==="
+                                export AWS_DEFAULT_REGION=${AWS_REGION}
+                                MASTER_IDS=$(aws ec2 describe-instances \
+                                    --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=running,pending" \
+                                    --query "Reservations[].Instances[].InstanceId" \
+                                    --output text)
+                                WORKER_IDS=$(aws ec2 describe-instances \
+                                    --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
+                                    --query "Reservations[].Instances[].InstanceId" \
+                                    --output text)
+                                INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
+                                if [ -n "$INSTANCE_IDS" ]; then
+                                    echo "Stopping instances: $INSTANCE_IDS"
+                                    aws ec2 stop-instances --instance-ids $INSTANCE_IDS
+                                else
+                                    echo "No running instances found with tags Name=master_instance or Name=worker_instance"
+                                fi
                             '''
                             break
-                            
+                        
                         case 'Start Server':
                             sh '''
-                                set +x
-                                echo "=== Starting Servers ==="
-                                # Get stopped instance IDs and start them
-                                aws ec2 start-instances --instance-ids ${INSTANCE_IDS//,/ }
-                                echo "=== Servers Started ==="
+                                export AWS_DEFAULT_REGION=${AWS_REGION}
+                                MASTER_IDS=$(aws ec2 describe-instances \
+                                    --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=stopped" \
+                                    --query "Reservations[].Instances[].InstanceId" \
+                                    --output text)
+                                WORKER_IDS=$(aws ec2 describe-instances \
+                                    --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=stopped" \
+                                    --query "Reservations[].Instances[].InstanceId" \
+                                    --output text)
+                                INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
+                                if [ -n "$INSTANCE_IDS" ]; then
+                                    echo "Starting instances: $INSTANCE_IDS"
+                                    aws ec2 start-instances --instance-ids $INSTANCE_IDS
+                                else
+                                    echo "No stopped instances found with tags Name=master_instance or Name=worker_instance"
+                                fi
                             '''
                             break
-                            
+                        
                         case 'Display Addresses':
                             sh '''
                                 set +x
-                                echo "=== Server Addresses ==="
-                                # Display public and private IPs
-                                aws ec2 describe-instances --instance-ids ${INSTANCE_IDS//,/ } --query 'Reservations[].Instances[].[InstanceId,PublicIpAddress,PrivateIpAddress,Tags[?Key==`Name`].Value | [0]]' --output table
-                                echo "==================="
+                                export AWS_DEFAULT_REGION=${AWS_REGION}
+                                echo "=== Worker Instance Public Addresses ==="
+                                WORKER_DATA=$(aws ec2 describe-instances \
+                                    --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
+                                    --query "Reservations[].Instances[].[PublicIpAddress,PublicDnsName]" \
+                                    --output text)
+                                if [ -n "$WORKER_DATA" ]; then
+                                    echo "$WORKER_DATA" | while read -r ip dns; do
+                                        echo "Worker $((i+=1)):"
+                                        echo "  Public IP: $ip"
+                                        echo "  Public DNS: $dns"
+                                    done
+                                else
+                                    echo "No running worker instances found with tag Name=worker_instance"
+                                fi
+                                echo "======================================"
                             '''
                             break
-                            
+                        
                         case 'Destroy Infrastructure':
-                            sh '''
-                                set +x
-                                echo "=== Destroying Infrastructure ==="
-                                # Your infrastructure destruction script
-                                # For AWS CloudFormation example:
-                                # aws cloudformation delete-stack --stack-name my-stack
-                                # Or directly terminate instances:
-                                aws ec2 terminate-instances --instance-ids ${INSTANCE_IDS//,/ }
-                                echo "=== Infrastructure Destroyed ==="
-                            '''
+                            if (params.DESTROY_CONFIRMATION == 'destroy') {
+                                dir("/workspace/aws") {
+                                    sh 'terraform destroy -auto-approve'
+                                }
+                            } else {
+                                error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
+                            }
                             break
+                        
+                        default:
+                            error("⚠️ No valid action selected. Please choose a valid action to proceed.")
                     }
                 }
             }
@@ -252,14 +343,34 @@ with open("serverState.properties", "w") as f:
     }
     
     post {
-        success {
-            echo "Pipeline executed successfully"
-        }
-        failure {
-            echo "Pipeline failed"
-        }
         always {
             cleanWs()
+        }
+        success {
+            echo "Pipeline completed successfully"
+            script {
+                switch(params.ACTION) {
+                    case 'Infrastructure Bootstrapping':
+                        echo "✅ Infrastructure created successfully! Next steps:"
+                        echo "1. Run again to get updated action options based on new state"
+                        break
+                    case 'Start Server':
+                        echo "✅ Server started successfully! Next steps:"
+                        echo "1. Run again to get updated action options based on new state"
+                        break
+                    case 'Stop running Server':
+                        echo "✅ Server stopped successfully! Next steps:"
+                        echo "1. Run again to get updated action options based on new state"
+                        break
+                    case 'Destroy Infrastructure':
+                        echo "✅ Infrastructure destroyed successfully! Next steps:"
+                        echo "1. Run again to get updated action options based on new state"
+                        break
+                    default:
+                        echo "✅ Action '${params.ACTION}' completed successfully"
+                        echo "Run again to get updated actions based on current state"
+                }
+            }
         }
     }
 }
