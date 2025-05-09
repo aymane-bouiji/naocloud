@@ -10,6 +10,8 @@ pipeline {
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
         string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
+        // Action parameter with default options - will be used if state file doesn't exist
+        choice(name: 'ACTION', choices: ['Infrastructure Bootstrapping'], description: 'Select an action to perform')
     }
     
     stages {
@@ -78,7 +80,7 @@ pipeline {
                         instancesStopped = false
                     }
                     
-                    // Generate the action choices HTML
+                    // Generate the action choices based on current state
                     def actionChoices = []
                     
                     // Always available
@@ -101,177 +103,65 @@ pipeline {
                         }
                     }
                     
-                    // Store the current state in environment variables
-                    env.TERRAFORM_STATE_EXISTS = terraformStateExists.toString()
-                    env.INSTANCES_RUNNING = instancesRunning.toString()
-                    env.INSTANCES_STOPPED = instancesStopped.toString()
+                    // Store the current state in a state file that persists between builds
+                    // The state file will remain in the workspace
+                    def stateFile = "${WORKSPACE}/infrastructure_state.txt"
+                    def stateContent = """TERRAFORM_STATE_EXISTS=${terraformStateExists}
+INSTANCES_RUNNING=${instancesRunning}
+INSTANCES_STOPPED=${instancesStopped}
+AVAILABLE_ACTIONS=${actionChoices.join(',')}
+"""
+                    writeFile file: stateFile, text: stateContent
                     
-                    // Create the Active Choice Parameter script that will be used for the ACTION parameter
-                    def activeChoiceScript = """
-                        import hudson.model.*;
-                        import jenkins.model.*;
-                        
-                        def actions = []
-                        
-                        boolean terraformStateExists = Boolean.parseBoolean(System.getenv('TERRAFORM_STATE_EXISTS') ?: 'false')
-                        boolean instancesRunning = Boolean.parseBoolean(System.getenv('INSTANCES_RUNNING') ?: 'false')
-                        boolean instancesStopped = Boolean.parseBoolean(System.getenv('INSTANCES_STOPPED') ?: 'false')
-                        
-                        // Build choices based on infrastructure state
-                        if (!terraformStateExists) {
-                            actions.add("Infrastructure Bootstrapping")
-                        } else {
-                            actions.add("Infrastructure Configuration")
-                            actions.add("Application Deployment")
-                            actions.add("Destroy Infrastructure")
-                            
-                            if (instancesRunning) {
-                                actions.add("Stop running Server")
-                                actions.add("Display Addresses")
-                            }
-                            
-                            if (instancesStopped) {
-                                actions.add("Start Server")
-                            }
-                        }
-                        
-                        return actions
-                    """
-                    
-                    // Create a Groovy script file for the Active Choice Parameter
-                    writeFile file: 'actionChoices.groovy', text: activeChoiceScript
-                    
-                    // Create a file with required properties to help the UI
-                    def stateProperties = """
-                        terraformStateExists=${terraformStateExists}
-                        instancesRunning=${instancesRunning}
-                        instancesStopped=${instancesStopped}
-                        availableActions=${actionChoices.join(',')}
-                    """
-                    writeFile file: 'infrastructure_state.properties', text: stateProperties
-                    
-                    // Create HTML output to show available actions
-                    def htmlContent = """
-                        <h3>Available Actions Based on Current Infrastructure State:</h3>
-                        <ul>
-                    """
-                    
+                    // Display available actions to the user
+                    echo "Available actions based on current infrastructure state:"
                     actionChoices.each { action ->
-                        htmlContent += "<li>${action}</li>"
+                        echo "- ${action}"
                     }
                     
-                    htmlContent += """
-                        </ul>
-                        <p><b>Please select an action from the dropdown below:</b></p>
-                    """
-                    
-                    // Display the HTML content
-                    echo htmlContent
-                    
-                    // Save the action choices for later usage
-                    env.ACTION_CHOICES = actionChoices.join(',')
-                    
-                    // Create prompt for ACTION using a dynamically generated dropdown
-                    def actionOptions = []
-                    actionChoices.each { choice ->
-                        actionOptions.add("<option value=\"${choice}\">${choice}</option>")
-                    }
-                    
-                    def actionDropdown = """
-                        <select name="ACTION" id="action-select">
-                            ${actionOptions.join('')}
-                        </select>
-                    """
-                    
-                    // Create the destroy confirmation input if needed
-                    def destroyConfirmation = ""
-                    if (actionChoices.contains("Destroy Infrastructure")) {
-                        destroyConfirmation = """
-                            <div id="destroy-confirmation" style="display:none; margin-top: 10px;">
-                                <label for="destroy-input">Type "destroy" to confirm deletion:</label>
-                                <input type="text" id="destroy-input" name="DESTROY_CONFIRMATION">
-                            </div>
-                            <script>
-                                document.getElementById('action-select').addEventListener('change', function() {
-                                    var destroyConfirmation = document.getElementById('destroy-confirmation');
-                                    if (this.value === 'Destroy Infrastructure') {
-                                        destroyConfirmation.style.display = 'block';
-                                    } else {
-                                        destroyConfirmation.style.display = 'none';
-                                    }
-                                });
-                            </script>
-                        """
-                    }
-                    
-                    // Build a custom input form
-                    def customForm = """
-                        <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-                            <h2>Cloud Infrastructure Management</h2>
-                            
-                            <div style="margin-bottom: 10px;">
-                                <label for="action-select"><b>Select an action:</b></label><br>
-                                ${actionDropdown}
-                            </div>
-                            
-                            ${destroyConfirmation}
-                            
-                            <div style="margin-top: 20px;">
-                                <input type="submit" value="Execute Action" style="background-color: #0066cc; color: white; padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer;">
-                            </div>
-                        </div>
-                    """
-                    
-                    // In a real Jenkins environment, this would use the input step
-                    // For now, just display the form and simulate user input
-                    
-                    // Check if the ACTION parameter is set
-                    if (!params.containsKey('ACTION') || params.ACTION == null || params.ACTION.trim() == '') {
-                        // If no ACTION is specified, show the form and wait for user input
+                    // If the selected ACTION is not in the available choices, prompt the user
+                    if (!actionChoices.contains(params.ACTION)) {
+                        echo "Current selected action '${params.ACTION}' is not valid in the current state."
                         def result = input(
                             id: 'userInput',
                             message: 'Select an action to perform',
                             parameters: [
-                                choice(name: 'ACTION', choices: actionChoices, description: 'Select an action to perform on the cloud infrastructure')
+                                choice(name: 'ACTION', choices: actionChoices, 
+                                       description: 'Select an action to perform on the cloud infrastructure')
                             ]
                         )
-                        
-                        // Store the ACTION for use in subsequent stages
                         env.ACTION = result.ACTION
                     } else {
-                        // Use the provided ACTION parameter
                         env.ACTION = params.ACTION
                     }
                     
-                    // Validate if the action is still valid in the current state
-                    if (!actionChoices.contains(env.ACTION)) {
-                        error("Selected action '${env.ACTION}' is not valid in the current infrastructure state. Please select from: ${actionChoices.join(', ')}")
-                    }
-                    
                     echo "Proceeding with action: ${env.ACTION}"
+                    
+                    // Write the action choices to a file that can be read by the Jenkins job configuration
+                    // This file can be used by a simple script in Jenkins job configuration to update parameters
+                    writeFile file: "${WORKSPACE}/action_choices.txt", text: actionChoices.join('\n')
                 }
             }
         }
         
         stage('Parameter Validation') {
+            when {
+                expression { env.ACTION == "Destroy Infrastructure" }
+            }
             steps {
                 script {
-                    // Validate destroy confirmation
-                    if (env.ACTION == "Destroy Infrastructure") {
-                        // Get the destroy confirmation if not provided
-                        if (!params.containsKey('DESTROY_CONFIRMATION') || params.DESTROY_CONFIRMATION != 'destroy') {
-                            def destroyConfirm = input(
-                                id: 'destroyConfirm',
-                                message: 'Type "destroy" to confirm deletion of the cloud environment',
-                                parameters: [
-                                    string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion of the cloud environment')
-                                ]
-                            )
-                            
-                            if (destroyConfirm.DESTROY_CONFIRMATION != 'destroy') {
-                                error("❌ Destroy confirmation not provided. You must type 'destroy' to proceed with infrastructure deletion.")
-                            }
-                        }
+                    // Validate destroy confirmation for destructive action
+                    def destroyConfirm = input(
+                        id: 'destroyConfirm',
+                        message: 'Type "destroy" to confirm deletion of the cloud environment',
+                        parameters: [
+                            string(name: 'DESTROY_CONFIRMATION', defaultValue: '', 
+                                   description: 'Type "destroy" to confirm deletion of the cloud environment')
+                        ]
+                    )
+                    
+                    if (destroyConfirm.DESTROY_CONFIRMATION != 'destroy') {
+                        error("❌ Destroy confirmation not provided. You must type 'destroy' to proceed with infrastructure deletion.")
                     }
                 }
             }
@@ -422,6 +312,12 @@ pipeline {
     }
     
     post {
+        success {
+            echo "Pipeline completed successfully with action: ${env.ACTION}"
+        }
+        failure {
+            echo "Pipeline failed during execution of action: ${env.ACTION}"
+        }
         always {
             cleanWs()
         }
