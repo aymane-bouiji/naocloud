@@ -1,156 +1,96 @@
 pipeline {
     agent any
     
-    triggers {
-        pollSCM('*/5 * * * *')
-    }
-    
-    // Define base parameters
+    // Need to manually update these choices when infrastructure changes
+    // The first job will display the valid choices in its output
     parameters {
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
         string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
-        // Action parameter with default options - will be used if state file doesn't exist
-        choice(name: 'ACTION', choices: ['Infrastructure Bootstrapping'], description: 'Select an action to perform')
+        choice(name: 'ACTION', choices: [
+            'Infrastructure Bootstrapping',
+            'Infrastructure Configuration', 
+            'Application Deployment',
+            'Destroy Infrastructure',
+            'Stop running Server',
+            'Start Server',
+            'Display Addresses'
+        ], description: 'Action to perform - must match one of the available actions from the detection job')
     }
     
     stages {
-        stage('Active Parameter Detection') {
+        stage('Load Infrastructure State') {
             steps {
                 script {
                     // Set AWS region for commands
                     env.AWS_DEFAULT_REGION = params.AWS_REGION
                     
-                    echo "Detecting infrastructure state..."
+                    // Create directory for state files
+                    sh "mkdir -p ${WORKSPACE}/state"
                     
-                    // Check for existing infrastructure by looking for terraform state
-                    def terraformStateExists = false
-                    try {
-                        dir("/workspace/aws") {
-                            terraformStateExists = sh(
-                                script: 'test -d .terraform && echo "true" || echo "false"', 
-                                returnStdout: true
-                            ).trim() == "true" || fileExists('/workspace/aws/terraform.tfstate')
+                    // Copy the state files from the previous job
+                    copyArtifacts(
+                        projectName: 'Detect-Infrastructure-State',
+                        filter: 'state/*',
+                        target: '.',
+                        flatten: false,
+                        selector: lastSuccessful()
+                    )
+                    
+                    // Load state from files
+                    if (fileExists("${WORKSPACE}/state/infrastructure_state.txt")) {
+                        def stateFile = readFile "${WORKSPACE}/state/infrastructure_state.txt"
+                        def stateLines = stateFile.split('\n')
+                        
+                        stateLines.each { line ->
+                            if (line.contains('=')) {
+                                def parts = line.split('=', 2)
+                                env[parts[0]] = parts[1]
+                            }
                         }
-                    } catch (Exception e) {
-                        echo "Error checking terraform state: ${e.message}"
-                    }
-                    
-                    // Determine if instances exist and their state
-                    def instancesRunning = false
-                    def instancesStopped = false
-                    
-                    try {
-                        // Check for running instances
-                        def runningInstances = sh(
-                            script: '''
-                                aws ec2 describe-instances \
-                                --filters "Name=tag:Name,Values=master_instance,worker_instance" \
-                                "Name=instance-state-name,Values=running,pending" \
-                                --query "length(Reservations[].Instances[])" \
-                                --output text || echo "0"
-                            ''',
-                            returnStdout: true
-                        ).trim()
                         
-                        // Check for stopped instances
-                        def stoppedInstances = sh(
-                            script: '''
-                                aws ec2 describe-instances \
-                                --filters "Name=tag:Name,Values=master_instance,worker_instance" \
-                                "Name=instance-state-name,Values=stopped" \
-                                --query "length(Reservations[].Instances[])" \
-                                --output text || echo "0"
-                            ''',
-                            returnStdout: true
-                        ).trim()
-                        
-                        // Set state flags
-                        instancesRunning = runningInstances != '0' && runningInstances != ''
-                        instancesStopped = stoppedInstances != '0' && stoppedInstances != ''
-                        
-                        echo "Infrastructure state detected:"
-                        echo "- Terraform state exists: ${terraformStateExists}"
-                        echo "- Running instances: ${instancesRunning}"
-                        echo "- Stopped instances: ${instancesStopped}"
-                    } catch (Exception e) {
-                        echo "Error detecting instance state: ${e.message}"
-                        // If we can't determine state, assume nothing exists
-                        instancesRunning = false
-                        instancesStopped = false
-                    }
-                    
-                    // Generate the action choices based on current state
-                    def actionChoices = []
-                    
-                    // Always available
-                    if (!terraformStateExists) {
-                        actionChoices.add("Infrastructure Bootstrapping")
+                        echo "Loaded infrastructure state:"
+                        echo "- Terraform state exists: ${env.TERRAFORM_STATE_EXISTS}"
+                        echo "- Running instances: ${env.INSTANCES_RUNNING}"
+                        echo "- Stopped instances: ${env.INSTANCES_STOPPED}"
                     } else {
-                        // If infrastructure exists
-                        actionChoices.add("Infrastructure Configuration")
-                        actionChoices.add("Application Deployment")
-                        actionChoices.add("Destroy Infrastructure")
-                        
-                        // Instance specific actions
-                        if (instancesRunning) {
-                            actionChoices.add("Stop running Server")
-                            actionChoices.add("Display Addresses")
-                        }
-                        
-                        if (instancesStopped) {
-                            actionChoices.add("Start Server")
-                        }
+                        error "Infrastructure state file not found. Please run the 'Detect Infrastructure State' job first."
                     }
                     
-                    // Store the current state in a state file that persists between builds
-                    // The state file will remain in the workspace
-                    def stateFile = "${WORKSPACE}/infrastructure_state.txt"
-                    def stateContent = """TERRAFORM_STATE_EXISTS=${terraformStateExists}
-INSTANCES_RUNNING=${instancesRunning}
-INSTANCES_STOPPED=${instancesStopped}
-AVAILABLE_ACTIONS=${actionChoices.join(',')}
-"""
-                    writeFile file: stateFile, text: stateContent
-                    
-                    // Display available actions to the user
-                    echo "Available actions based on current infrastructure state:"
-                    actionChoices.each { action ->
-                        echo "- ${action}"
-                    }
-                    
-                    // If the selected ACTION is not in the available choices, prompt the user
-                    if (!actionChoices.contains(params.ACTION)) {
-                        echo "Current selected action '${params.ACTION}' is not valid in the current state."
-                        def result = input(
-                            id: 'userInput',
-                            message: 'Select an action to perform',
-                            parameters: [
-                                choice(name: 'ACTION', choices: actionChoices, 
-                                       description: 'Select an action to perform on the cloud infrastructure')
-                            ]
-                        )
-                        env.ACTION = result.ACTION
+                    // Load and validate available actions
+                    def availableActions = []
+                    if (fileExists("${WORKSPACE}/state/available_actions.txt")) {
+                        availableActions = readFile("${WORKSPACE}/state/available_actions.txt").split('\n')
+                        
+                        echo "Available actions:"
+                        availableActions.each { action ->
+                            echo "- ${action}"
+                        }
+                        
+                        // Validate that the selected action is available
+                        if (!availableActions.contains(params.ACTION)) {
+                            error """Invalid action selected: ${params.ACTION}
+                            
+Available actions based on current infrastructure state are:
+${availableActions.join('\n')}
+
+Please select one of these actions and run the job again."""
+                        }
+                        
+                        echo "Selected action '${params.ACTION}' is valid for the current infrastructure state."
                     } else {
-                        env.ACTION = params.ACTION
+                        error "Available actions file not found. Please run the 'Detect Infrastructure State' job first."
                     }
-                    
-                    echo "Proceeding with action: ${env.ACTION}"
-                    
-                    // Write the action choices to a file that can be read by the Jenkins job configuration
-                    // This file can be used by a simple script in Jenkins job configuration to update parameters
-                    writeFile file: "${WORKSPACE}/action_choices.txt", text: actionChoices.join('\n')
                 }
             }
         }
         
-        stage('Parameter Validation') {
+        stage('Validate Destroy Confirmation') {
             when {
-                expression { env.ACTION == "Destroy Infrastructure" }
+                expression { params.ACTION == "Destroy Infrastructure" }
             }
             steps {
                 script {
-                    // Validate destroy confirmation for destructive action
                     def destroyConfirm = input(
                         id: 'destroyConfirm',
                         message: 'Type "destroy" to confirm deletion of the cloud environment',
@@ -161,15 +101,15 @@ AVAILABLE_ACTIONS=${actionChoices.join(',')}
                     )
                     
                     if (destroyConfirm.DESTROY_CONFIRMATION != 'destroy') {
-                        error("❌ Destroy confirmation not provided. You must type 'destroy' to proceed with infrastructure deletion.")
+                        error "❌ Destroy confirmation not provided. You must type 'destroy' to proceed with infrastructure deletion."
                     }
                 }
             }
         }
-
+        
         stage('Infrastructure Bootstrapping') {
             when {
-                expression { env.ACTION == "Infrastructure Bootstrapping" }
+                expression { params.ACTION == "Infrastructure Bootstrapping" }
             }
             steps {
                 dir("/workspace/aws") {
@@ -182,7 +122,7 @@ AVAILABLE_ACTIONS=${actionChoices.join(',')}
         
         stage('Infrastructure Configuration') {
             when {
-                expression { env.ACTION == "Infrastructure Configuration" }
+                expression { params.ACTION == "Infrastructure Configuration" }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -207,7 +147,7 @@ AVAILABLE_ACTIONS=${actionChoices.join(',')}
         
         stage('Application Deployment') {
             when {
-                expression { env.ACTION == "Application Deployment" }
+                expression { params.ACTION == "Application Deployment" }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -222,7 +162,7 @@ AVAILABLE_ACTIONS=${actionChoices.join(',')}
         
         stage('Stop Server') {
             when {
-                expression { env.ACTION == "Stop running Server" }
+                expression { params.ACTION == "Stop running Server" }
             }
             steps {
                 sh '''
@@ -248,7 +188,7 @@ AVAILABLE_ACTIONS=${actionChoices.join(',')}
         
         stage('Start Server') {
             when {
-                expression { env.ACTION == "Start Server" }
+                expression { params.ACTION == "Start Server" }
             }
             steps {
                 sh '''
@@ -274,7 +214,7 @@ AVAILABLE_ACTIONS=${actionChoices.join(',')}
         
         stage('Destroy Infrastructure') {
             when {
-                expression { env.ACTION == "Destroy Infrastructure" }
+                expression { params.ACTION == "Destroy Infrastructure" }
             }
             steps {
                 dir("/workspace/aws") {
@@ -285,7 +225,7 @@ AVAILABLE_ACTIONS=${actionChoices.join(',')}
         
         stage('Display addresses of the server') {
             when {
-                expression { env.ACTION == "Display Addresses" }
+                expression { params.ACTION == "Display Addresses" }
             }
             steps {
                 sh '''
@@ -313,10 +253,13 @@ AVAILABLE_ACTIONS=${actionChoices.join(',')}
     
     post {
         success {
-            echo "Pipeline completed successfully with action: ${env.ACTION}"
+            echo "Action '${params.ACTION}' completed successfully."
+            build job: 'Detect-Infrastructure-State', parameters: [
+                string(name: 'AWS_REGION', value: params.AWS_REGION)
+            ], wait: false
         }
         failure {
-            echo "Pipeline failed during execution of action: ${env.ACTION}"
+            echo "Action '${params.ACTION}' failed."
         }
         always {
             cleanWs()
