@@ -5,29 +5,25 @@ pipeline {
         pollSCM('*/5 * * * *')
     }
     
-    // Define minimal initial parameters
     parameters {
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
         string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
-        // Dynamic parameter placeholder - real options will be set in first stage
         choice(name: 'ACTION', choices: ['Detect Infrastructure State'], description: 'Select an action to perform on the cloud infrastructure')
     }
     
     stages {
         stage('Detect Infrastructure State') {
             when {
-                // Only run detection when ACTION is set to default
                 expression { params.ACTION == 'Detect Infrastructure State' }
             }
             steps {
                 script {
-                    // Set AWS region for commands
                     env.AWS_DEFAULT_REGION = params.AWS_REGION
                     
                     echo "Detecting infrastructure state..."
                     
-                    // Check for existing infrastructure by looking for terraform state
+                    // Check for Terraform state
                     def terraformStateExists = false
                     try {
                         dir("/workspace/aws") {
@@ -40,12 +36,10 @@ pipeline {
                         echo "Error checking terraform state: ${e.message}"
                     }
                     
-                    // Determine if instances exist and their state
+                    // Determine instance states
                     def instancesRunning = false
                     def instancesStopped = false
-                    
                     try {
-                        // Check for running instances
                         def runningInstances = sh(
                             script: '''
                                 aws ec2 describe-instances \
@@ -57,7 +51,6 @@ pipeline {
                             returnStdout: true
                         ).trim()
                         
-                        // Check for stopped instances
                         def stoppedInstances = sh(
                             script: '''
                                 aws ec2 describe-instances \
@@ -69,7 +62,6 @@ pipeline {
                             returnStdout: true
                         ).trim()
                         
-                        // Set state flags
                         instancesRunning = runningInstances != '0' && runningInstances != ''
                         instancesStopped = stoppedInstances != '0' && stoppedInstances != ''
                         
@@ -79,64 +71,57 @@ pipeline {
                         echo "- Stopped instances: ${instancesStopped}"
                     } catch (Exception e) {
                         echo "Error detecting instance state: ${e.message}"
-                        // If we can't determine state, assume nothing exists
                         instancesRunning = false
                         instancesStopped = false
                     }
                     
-                    // Dynamic ACTION choices based on infrastructure state
+                    // Dynamic action choices
                     def actionChoices = []
-                    
-                    // Always available
                     if (!terraformStateExists) {
                         actionChoices.add("Infrastructure Bootstrapping")
                     } else {
-                        // If infrastructure exists
                         actionChoices.add("Infrastructure Configuration")
                         actionChoices.add("Application Deployment")
                         actionChoices.add("Destroy Infrastructure")
-                        
-                        // Instance specific actions
                         if (instancesRunning) {
                             actionChoices.add("Stop running Server")
                             actionChoices.add("Display Addresses")
                         }
-                        
                         if (instancesStopped) {
                             actionChoices.add("Start Server")
                         }
                     }
                     
-                    // Additional parameters based on selected actions
-                    def dynamicParams = []
+                    // Ensure at least one action
+                    if (actionChoices.isEmpty()) {
+                        actionChoices.add("No actions available")
+                    }
                     
-                    // Always include the base parameters
+                    // Additional parameters
+                    def dynamicParams = []
                     dynamicParams.add(string(name: 'AWS_REGION', defaultValue: params.AWS_REGION, 
                                            description: 'AWS region to use (e.g., eu-west-1)'))
                     dynamicParams.add(string(name: 'LOG_LEVEL', defaultValue: params.LOG_LEVEL, 
                                           description: 'Log detail level: INFO or DEBUG. Defaults to INFO.'))
                     dynamicParams.add(string(name: 'CLUSTER_VERSION', defaultValue: params.CLUSTER_VERSION, 
                                           description: 'Cluster version for naocloud image'))
-                    
-                    // Add dynamic ACTION parameter
                     dynamicParams.add(choice(name: 'ACTION', choices: actionChoices, 
                                           description: 'Select an action to perform on the cloud infrastructure'))
                     
-                    // Add confirmation for destroy
                     if (actionChoices.contains("Destroy Infrastructure")) {
                         dynamicParams.add(string(name: 'DESTROY_CONFIRMATION', defaultValue: '', 
                                                description: 'Type "destroy" to confirm deletion of the cloud environment'))
                     }
                     
-                    // Update the build with dynamic parameters
+                    // Update pipeline parameters
                     properties([
                         parameters(dynamicParams)
                     ])
                     
-                    // Abort the current build to force the user to submit with new parameters
+                    // Exit gracefully
                     currentBuild.description = "Infrastructure detection complete. Please run the build again with your selected action."
-                    currentBuild.result = 'ABORTED'
-                    error("Infrastructure state detected. Please run the build again to select an action.")
+                    echo "Detection complete. Please rerun the build to select an action."
+                    return // Exit pipeline without error
                 }
             }
         }
@@ -148,8 +133,6 @@ pipeline {
             steps {
                 script {
                     echo "Validating parameters for action: ${params.ACTION}"
-                    
-                    // Validate destroy confirmation
                     if (params.ACTION == "Destroy Infrastructure" && 
                         (!params.containsKey('DESTROY_CONFIRMATION') || params.DESTROY_CONFIRMATION != 'destroy')) {
                         error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
@@ -178,13 +161,11 @@ pipeline {
             steps {
                 dir("/workspace/ansible") {
                     sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
-
                     sh """
                         ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
                             --private-key=/workspace/aws/id_rsa \
                             -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
                     """
-                    
                     sh """
                         ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
                             --private-key=/workspace/aws/id_rsa \
@@ -203,7 +184,7 @@ pipeline {
             steps {
                 dir("/workspace/ansible") {
                     sh """
-                        ansible-playbook -i aws_ec2.yaml helm-playbook.yaml  \
+                        ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
                             --private-key=/workspace/aws/id_rsa \
                             -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
                     """
@@ -277,7 +258,7 @@ pipeline {
             }
         }
         
-        stage('Display addresses of the server') {
+        stage('Display Addresses') {
             when {
                 expression { params.ACTION == "Display Addresses" }
             }
