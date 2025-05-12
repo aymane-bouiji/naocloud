@@ -9,7 +9,11 @@ pipeline {
         string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
         string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
         string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
-        string(name: 'ACTION', defaultValue: 'Detect Infrastructure State', description: 'Comma-separated list of actions (e.g., Infrastructure Bootstrapping,Application Deployment)')
+        // Active Choices parameter for multiple selections
+        activeChoice(name: 'ACTION', description: 'Select actions to perform (can select multiple)', script: '''
+            def choices = ['Detect Infrastructure State']
+            return choices
+        ''', choiceType: 'CHECKBOX')
         string(name: 'DESTROY_CONFIRMATION', defaultValue: '', description: 'Type "destroy" to confirm deletion (required for Destroy Infrastructure)')
     }
     
@@ -97,7 +101,7 @@ pipeline {
                         actionChoices.add("No actions available")
                     }
                     
-                    // Update parameters
+                    // Update ACTION parameter dynamically
                     def dynamicParams = []
                     dynamicParams.add(string(name: 'AWS_REGION', defaultValue: params.AWS_REGION, 
                                            description: 'AWS region to use (e.g., eu-west-1)'))
@@ -105,8 +109,8 @@ pipeline {
                                           description: 'Log detail level: INFO or DEBUG. Defaults to INFO.'))
                     dynamicParams.add(string(name: 'CLUSTER_VERSION', defaultValue: params.CLUSTER_VERSION, 
                                           description: 'Cluster version for naocloud image'))
-                    dynamicParams.add(string(name: 'ACTION', defaultValue: actionChoices.join(','), 
-                                           description: 'Comma-separated list of actions (e.g., Infrastructure Bootstrapping,Application Deployment)'))
+                    dynamicParams.add(activeChoice(name: 'ACTION', description: 'Select actions to perform (can select multiple)', 
+                                                 script: "return ${actionChoices.inspect()}", choiceType: 'CHECKBOX'))
                     if (actionChoices.contains("Destroy Infrastructure")) {
                         dynamicParams.add(string(name: 'DESTROY_CONFIRMATION', defaultValue: '', 
                                                description: 'Type "destroy" to confirm deletion'))
