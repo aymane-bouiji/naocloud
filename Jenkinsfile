@@ -10,7 +10,7 @@ pipeline {
     }
     
     parameters {
-        string(name: 'NaoCloud_Version', defaultValue: '23.09', description: 'NaoCloud version :please enter the version of naocloud release you want to install')
+        string(name: 'NaoCloud_Version', defaultValue: '23.09', description: 'NaoCloud version : Please enter the version of naocloud release you want to install')
         choice(
             name: 'ACTION',
             choices: ['Detect Infrastructure State'],
