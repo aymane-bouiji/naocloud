@@ -1,26 +1,52 @@
 pipeline {
     agent any
     
+    environment {
+        AWS_DEFAULT_REGION = 'eu-west-1' // Set globally for all stages
+    }
+    
     triggers {
         pollSCM('*/5 * * * *')
     }
     
     parameters {
-        string(name: 'AWS_REGION', defaultValue: 'eu-west-1', description: 'AWS region to use (e.g., eu-west-1)')
-        string(name: 'LOG_LEVEL', defaultValue: 'INFO', description: 'Log detail level: INFO or DEBUG. Defaults to INFO.')
-        string(name: 'CLUSTER_VERSION', defaultValue: '23.09', description: 'Cluster version for naocloud image')
-        choice(name: 'ACTION', choices: ['Detect Infrastructure State'], description: 'Select an action to perform on the cloud infrastructure')
+        string(name: 'NaoCloud_Version', defaultValue: '23.09', description: 'NaoCloud version :please enter the version of naocloud release you want to install')
+        choice(
+            name: 'ACTION',
+            choices: ['Detect Infrastructure State'],
+            description: '''
+                Select an action to perform on the cloud infrastructure. Available actions:
+
+                - Detect Infrastructure State: Checks the current state of NaoServer.
+            '''
+        )
     }
     
     stages {
+        stage('Validate Parameters') {
+            when {
+                expression { params.ACTION != 'Detect Infrastructure State' }
+            }
+            steps {
+                script {
+                    echo "Validating parameters for action: ${params.ACTION}"
+                    if (params.ACTION == "Destroy Infrastructure" && 
+                        (!params.containsKey('DESTROY_CONFIRMATION') || params.DESTROY_CONFIRMATION != 'destroy')) {
+                        error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
+                    }
+                    if (params.ACTION == "No actions available") {
+                        error("⚠️ No valid actions selected. Please run detection to update available actions.")
+                    }
+                }
+            }
+        }
+        
         stage('Detect Infrastructure State') {
             when {
                 expression { params.ACTION == 'Detect Infrastructure State' }
             }
             steps {
                 script {
-                    env.AWS_DEFAULT_REGION = params.AWS_REGION
-                    
                     echo "Detecting infrastructure state..."
                     
                     // Check for Terraform state
@@ -32,6 +58,7 @@ pipeline {
                                 returnStdout: true
                             ).trim() == "true" || fileExists('/workspace/aws/terraform.tfstate')
                         }
+                        echo "Terraform state exists: ${terraformStateExists}"
                     } catch (Exception e) {
                         echo "Error checking terraform state: ${e.message}"
                     }
@@ -40,6 +67,18 @@ pipeline {
                     def instancesRunning = false
                     def instancesStopped = false
                     try {
+                        // Debug: Log all instances with relevant tags
+                        def instanceDetails = sh(
+                            script: '''
+                                aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=master_instance,worker_instance" \
+                                --query "Reservations[].Instances[].[InstanceId,State.Name]" \
+                                --output text
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                        echo "Instance details: ${instanceDetails}"
+                        
                         def runningInstances = sh(
                             script: '''
                                 aws ec2 describe-instances \
@@ -66,9 +105,8 @@ pipeline {
                         instancesStopped = stoppedInstances != '0' && stoppedInstances != ''
                         
                         echo "Infrastructure state detected:"
-                        echo "- Terraform state exists: ${terraformStateExists}"
-                        echo "- Running instances: ${instancesRunning}"
-                        echo "- Stopped instances: ${instancesStopped}"
+                        echo "- Running instances count: ${runningInstances} (instancesRunning: ${instancesRunning})"
+                        echo "- Stopped instances count: ${stoppedInstances} (instancesStopped: ${instancesStopped})"
                     } catch (Exception e) {
                         echo "Error detecting instance state: ${e.message}"
                         instancesRunning = false
@@ -77,40 +115,64 @@ pipeline {
                     
                     // Dynamic action choices
                     def actionChoices = []
+                    def actionDescriptions = [:]
                     if (!terraformStateExists) {
                         actionChoices.add("Infrastructure Bootstrapping")
+                        actionDescriptions["Infrastructure Bootstrapping"] = "Creates the infrastructure for NaoServer."
                     } else {
-                        actionChoices.add("Infrastructure Configuration")
+                        actionChoices.add("Cluster Bootstrapping")
                         actionChoices.add("Application Deployment")
                         actionChoices.add("Destroy Infrastructure")
+                        actionDescriptions["Cluster Bootstrapping"] = "Configure the cluster hosting NaoServer."
+                        actionDescriptions["Application Deployment"] = "Install Naoserver applications in the cluster."
+                        actionDescriptions["Destroy Infrastructure"] = "Destroys all NaoServer infrastructure (requires destroy confirmation)."
+                        // Always include Display Addresses to allow checking even if no instances
+                        actionChoices.add("Display Addresses")
+                        actionDescriptions["Display Addresses"] = "Displays IP addresses of NaoServer instances."
                         if (instancesRunning) {
                             actionChoices.add("Stop running Server")
-                            actionChoices.add("Display Addresses")
+                            actionDescriptions["Stop running Server"] = "Stops NaoServer running instances."
                         }
                         if (instancesStopped) {
                             actionChoices.add("Start Server")
+                            actionDescriptions["Start Server"] = "Starts stopped EC2 instances tagged as master_instance or worker_instance."
                         }
                     }
                     
                     // Ensure at least one action
                     if (actionChoices.isEmpty()) {
                         actionChoices.add("No actions available")
+                        actionDescriptions["No actions available"] = "No valid actions are available based on the current infrastructure state."
+                    }
+                    
+                    // Debug: Log action choices
+                    echo "Action choices: ${actionChoices.join(', ')}"
+                    
+                    // Build description for ACTION parameter with spacing
+                    def actionDescription = "Select an action to perform on the cloud infrastructure. Available actions:\n\n"
+                    actionChoices.each { choice ->
+                        actionDescription += "- ${choice}: ${actionDescriptions[choice]}\n\n"
                     }
                     
                     // Additional parameters
                     def dynamicParams = []
-                    dynamicParams.add(string(name: 'AWS_REGION', defaultValue: params.AWS_REGION, 
-                                           description: 'AWS region to use (e.g., eu-west-1)'))
-                    dynamicParams.add(string(name: 'LOG_LEVEL', defaultValue: params.LOG_LEVEL, 
-                                          description: 'Log detail level: INFO or DEBUG. Defaults to INFO.'))
-                    dynamicParams.add(string(name: 'CLUSTER_VERSION', defaultValue: params.CLUSTER_VERSION, 
-                                          description: 'Cluster version for naocloud image'))
-                    dynamicParams.add(choice(name: 'ACTION', choices: actionChoices, 
-                                          description: 'Select an action to perform on the cloud infrastructure'))
+                    dynamicParams.add(string(
+                        name: 'NaoCloud_Version',
+                        defaultValue: params.NaoCloud_Version, 
+                        description: 'NaoCloud version and the description: please enter the version of naocloud release you want to install'
+                    ))
+                    dynamicParams.add(choice(
+                        name: 'ACTION',
+                        choices: actionChoices,
+                        description: actionDescription
+                    ))
                     
                     if (actionChoices.contains("Destroy Infrastructure")) {
-                        dynamicParams.add(string(name: 'DESTROY_CONFIRMATION', defaultValue: '', 
-                                               description: 'Type "destroy" to confirm deletion of the cloud environment'))
+                        dynamicParams.add(string(
+                            name: 'DESTROY_CONFIRMATION',
+                            defaultValue: '',
+                            description: 'Type "destroy" to confirm deletion of the cloud environment'
+                        ))
                     }
                     
                     // Update pipeline parameters
@@ -119,24 +181,9 @@ pipeline {
                     ])
                     
                     // Exit gracefully
-                    currentBuild.description = "Infrastructure detection complete. Please run the build again with your selected action."
+                    currentBuild.description = "Infrastructure detection complete. Valid actions: ${actionChoices.join(', ')}. Please run the build again with your selected action."
                     echo "Detection complete. Please rerun the build to select an action."
                     return // Exit pipeline without error
-                }
-            }
-        }
-        
-        stage('Parameter Validation') {
-            when {
-                expression { params.ACTION != 'Detect Infrastructure State' }
-            }
-            steps {
-                script {
-                    echo "Validating parameters for action: ${params.ACTION}"
-                    if (params.ACTION == "Destroy Infrastructure" && 
-                        (!params.containsKey('DESTROY_CONFIRMATION') || params.DESTROY_CONFIRMATION != 'destroy')) {
-                        error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
-                    }
                 }
             }
         }
@@ -154,13 +201,13 @@ pipeline {
             }
         }
         
-        stage('Infrastructure Configuration') {
+        stage('Cluster Bootstrapping') {
             when {
-                expression { params.ACTION == "Infrastructure Configuration" }
+                expression { params.ACTION == "Cluster Bootstrapping" }
             }
             steps {
                 dir("/workspace/ansible") {
-                    sh "AWS_REGION=${params.AWS_REGION} ansible-inventory -i aws_ec2.yaml --list"
+                    sh "ansible-inventory -i aws_ec2.yaml --list"
                     sh """
                         ansible-playbook -i aws_ec2.yaml aws_playbook.yaml \
                             --private-key=/workspace/aws/id_rsa \
@@ -170,8 +217,8 @@ pipeline {
                         ansible-playbook -i aws_ec2.yaml push_load_playbook-1.yaml \
                             --private-key=/workspace/aws/id_rsa \
                             -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
-                            -e \"naocloud_tag=${params.CLUSTER_VERSION}\" \
-                            -e \"naogizmo_tag=${params.CLUSTER_VERSION}\"
+                            -e \"naocloud_tag=${params.NaoCloud_Version}\" \
+                            -e \"naogizmo_tag=${params.NaoCloud_Version}\"
                     """
                 }
             }
@@ -197,24 +244,30 @@ pipeline {
                 expression { params.ACTION == "Stop running Server" }
             }
             steps {
-                sh '''
-                    export AWS_DEFAULT_REGION=${AWS_REGION}
-                    MASTER_IDS=$(aws ec2 describe-instances \
-                        --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=running,pending" \
-                        --query "Reservations[].Instances[].InstanceId" \
-                        --output text)
-                    WORKER_IDS=$(aws ec2 describe-instances \
-                        --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
-                        --query "Reservations[].Instances[].InstanceId" \
-                        --output text)
-                    INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
-                    if [ -n "$INSTANCE_IDS" ]; then
-                        echo "Stopping instances: $INSTANCE_IDS"
-                        aws ec2 stop-instances --instance-ids $INSTANCE_IDS
-                    else
-                        echo "No running instances found with tags Name=master_instance or Name=worker_instance"
-                    fi
-                '''
+                script {
+                    try {
+                        sh '''
+                            export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+                            MASTER_IDS=$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=running,pending" \
+                                --query "Reservations[].Instances[].InstanceId" \
+                                --output text)
+                            WORKER_IDS=$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
+                                --query "Reservations[].Instances[].InstanceId" \
+                                --output text)
+                            INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
+                            if [ -n "$INSTANCE_IDS" ]; then
+                                echo "Stopping instances: $INSTANCE_IDS"
+                                aws ec2 stop-instances --instance-ids $INSTANCE_IDS
+                            else
+                                echo "No running instances found with tags Name=master_instance or Name=worker_instance"
+                            fi
+                        '''
+                    } catch (Exception e) {
+                        error("Failed to stop servers: ${e.message}. Ensure AWS credentials and region (${AWS_DEFAULT_REGION}) are valid.")
+                    }
+                }
             }
         }
         
@@ -223,24 +276,30 @@ pipeline {
                 expression { params.ACTION == "Start Server" }
             }
             steps {
-                sh '''
-                    export AWS_DEFAULT_REGION=${AWS_REGION}
-                    MASTER_IDS=$(aws ec2 describe-instances \
-                        --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=stopped" \
-                        --query "Reservations[].Instances[].InstanceId" \
-                        --output text)
-                    WORKER_IDS=$(aws ec2 describe-instances \
-                        --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=stopped" \
-                        --query "Reservations[].Instances[].InstanceId" \
-                        --output text)
-                    INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
-                    if [ -n "$INSTANCE_IDS" ]; then
-                        echo "Starting instances: $INSTANCE_IDS"
-                        aws ec2 start-instances --instance-ids $INSTANCE_IDS
-                    else
-                        echo "No stopped instances found with tags Name=master_instance or Name=worker_instance"
-                    fi
-                '''
+                script {
+                    try {
+                        sh '''
+                            export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+                            MASTER_IDS=$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=stopped" \
+                                --query "Reservations[].Instances[].InstanceId" \
+                                --output text)
+                            WORKER_IDS=$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=stopped" \
+                                --query "Reservations[].Instances[].InstanceId" \
+                                --output text)
+                            INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
+                            if [ -n "$INSTANCE_IDS" ]; then
+                                echo "Starting instances: $INSTANCE_IDS"
+                                aws ec2 start-instances --instance-ids $INSTANCE_IDS
+                            else
+                                echo "No stopped instances found with tags Name=master_instance or Name=worker_instance"
+                            fi
+                        '''
+                    } catch (Exception e) {
+                        error("Failed to start servers: ${e.message}. Ensure AWS credentials and region (${AWS_DEFAULT_REGION}) are valid.")
+                    }
+                }
             }
         }
         
@@ -263,25 +322,31 @@ pipeline {
                 expression { params.ACTION == "Display Addresses" }
             }
             steps {
-                sh '''
-                    set +x
-                    export AWS_DEFAULT_REGION=${AWS_REGION}
-                    echo "=== Worker Instance Public Addresses ==="
-                    WORKER_DATA=$(aws ec2 describe-instances \
-                        --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
-                        --query "Reservations[].Instances[].[PublicIpAddress,PublicDnsName]" \
-                        --output text)
-                    if [ -n "$WORKER_DATA" ]; then
-                        echo "$WORKER_DATA" | while read -r ip dns; do
-                            echo "Worker $((i+=1)):"
-                            echo "  Public IP: $ip"
-                            echo "  Public DNS: $dns"
-                        done
-                    else
-                        echo "No running worker instances found with tag Name=worker_instance"
-                    fi
-                    echo "======================================"
-                '''
+                script {
+                    try {
+                        sh '''
+                            set +x
+                            export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+                            echo "=== Worker Instance Public Addresses ==="
+                            WORKER_DATA=$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
+                                --query "Reservations[].Instances[].[PublicIpAddress,PublicDnsName]" \
+                                --output text)
+                            if [ -n "$WORKER_DATA" ]; then
+                                echo "$WORKER_DATA" | while read -r ip dns; do
+                                    echo "Worker $((i+=1)):"
+                                    echo "  Public IP: $ip"
+                                    echo "  Public DNS: $dns"
+                                done
+                            else
+                                echo "No running worker instances found with tag Name=worker_instance"
+                            fi
+                            echo "======================================"
+                        '''
+                    } catch (Exception e) {
+                        error("Failed to display addresses: ${e.message}. Ensure AWS credentials and region (${AWS_DEFAULT_REGION}) are valid.")
+                    }
+                }
             }
         }
     }
