@@ -10,7 +10,6 @@ pipeline {
     }
     
     parameters {
-        string(name: 'NaoCloud_Version', defaultValue: '23.09', description: 'NaoCloud version : Please enter the version of naocloud release you want to install')
         choice(
             name: 'ACTION',
             choices: ['Detect Infrastructure State'],
@@ -49,16 +48,37 @@ pipeline {
                 script {
                     echo "Detecting infrastructure state..."
                     
-                    // Check for Terraform state
+                    // Check for actual AWS infrastructure instead of just terraform state files
                     def terraformStateExists = false
                     try {
                         dir("/workspace/aws") {
-                            terraformStateExists = sh(
-                                script: 'test -d .terraform && echo "true" || echo "false"', 
+                            // Check if there are any instances with our tags in AWS
+                            def instanceCount = sh(
+                                script: '''
+                                    aws ec2 describe-instances \
+                                    --filters "Name=tag:Name,Values=master_instance,worker_instance" \
+                                    --query "length(Reservations[].Instances[])" \
+                                    --output text || echo "0"
+                                ''',
                                 returnStdout: true
-                            ).trim() == "true" || fileExists('/workspace/aws/terraform.tfstate')
+                            ).trim()
+                            
+                            // Also check terraform state but look for resources, not just file existence
+                            def tfStateEmpty = false
+                            if (fileExists('/workspace/aws/terraform.tfstate')) {
+                                tfStateEmpty = sh(
+                                    script: 'grep -q \'"resources": \\[\\]\' terraform.tfstate && echo "true" || echo "false"',
+                                    returnStdout: true
+                                ).trim() == "true"
+                            }
+                            
+                            // True if there are instances or if state file exists with resources
+                            terraformStateExists = (instanceCount != '0' && instanceCount != '') || 
+                                                 (fileExists('/workspace/aws/terraform.tfstate') && !tfStateEmpty)
+                            
+                            echo "Terraform active state exists: ${terraformStateExists}"
+                            echo "Instance count: ${instanceCount}"
                         }
-                        echo "Terraform state exists: ${terraformStateExists}"
                     } catch (Exception e) {
                         echo "Error checking terraform state: ${e.message}"
                     }
@@ -156,17 +176,28 @@ pipeline {
                     
                     // Additional parameters
                     def dynamicParams = []
-                    dynamicParams.add(string(
-                        name: 'NaoCloud_Version',
-                        defaultValue: params.NaoCloud_Version, 
-                        description: 'NaoCloud version and the description: please enter the version of naocloud release you want to install'
-                    ))
                     dynamicParams.add(choice(
                         name: 'ACTION',
                         choices: actionChoices,
                         description: actionDescription
                     ))
                     
+                    // Only add NaoCloud_Version parameter for specific actions that need it
+                    if (actionChoices.contains("Application Deployment") || 
+                        actionChoices.contains("Cluster Bootstrapping") || 
+                        actionChoices.contains("Infrastructure Bootstrapping")) {
+                        
+                        // Get current value if exists, otherwise use default
+                        def currentVersion = params.containsKey('NaoCloud_Version') ? params.NaoCloud_Version : '23.09'
+                        
+                        dynamicParams.add(string(
+                            name: 'NaoCloud_Version',
+                            defaultValue: currentVersion, 
+                            description: 'NaoCloud version: please enter the version of naocloud release you want to install'
+                        ))
+                    }
+                    
+                    // Only add DESTROY_CONFIRMATION for Destroy Infrastructure action
                     if (actionChoices.contains("Destroy Infrastructure")) {
                         dynamicParams.add(string(
                             name: 'DESTROY_CONFIRMATION',
