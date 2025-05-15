@@ -22,24 +22,6 @@ pipeline {
     }
     
     stages {
-        stage('Validate Parameters') {
-            when {
-                expression { params.ACTION != 'Detect Infrastructure State' }
-            }
-            steps {
-                script {
-                    echo "Validating parameters for action: ${params.ACTION}"
-                    if (params.ACTION == "Destroy Infrastructure" && 
-                        (!params.containsKey('DESTROY_CONFIRMATION') || params.DESTROY_CONFIRMATION != 'destroy')) {
-                        error("❌ Destroy confirmation not provided. Please type 'destroy' in DESTROY_CONFIRMATION to proceed.")
-                    }
-                    if (params.ACTION == "No actions available") {
-                        error("⚠️ No valid actions selected. Please run detection to update available actions.")
-                    }
-                }
-            }
-        }
-        
         stage('Detect Infrastructure State') {
             when {
                 expression { params.ACTION == 'Detect Infrastructure State' }
@@ -48,39 +30,60 @@ pipeline {
                 script {
                     echo "Detecting infrastructure state..."
                     
-                    // Check for actual AWS infrastructure instead of just terraform state files
-                    def terraformStateExists = false
+                    // DEBUG: Print current directory and list files
+                    sh "pwd && ls -la"
+                    
+                    // We'll completely avoid any file system checks and rely solely on AWS CLI
+                    def instanceExists = false
+                    def onlyTerminatedInstancesExist = false
+                    
                     try {
-                        dir("/workspace/aws") {
-                            // Check if there are any instances with our tags in AWS
-                            def instanceCount = sh(
+                        // Check for any instances with our tags in AWS
+                        def instanceCheck = sh(
+                            script: '''
+                                aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=master_instance,worker_instance" \
+                                --query "Reservations[].Instances[]" \
+                                --output json || echo "[]"
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                        
+                        echo "Debug - AWS instance check result: ${instanceCheck}"
+                        
+                        // Check if the response is empty or contains instances
+                        if (instanceCheck != "[]" && instanceCheck != "") {
+                            def allInstancesTerminated = sh(
                                 script: '''
-                                    aws ec2 describe-instances \
+                                    non_terminated=$(aws ec2 describe-instances \
                                     --filters "Name=tag:Name,Values=master_instance,worker_instance" \
+                                    "Name=instance-state-name,Values=running,stopped,pending,stopping" \
                                     --query "length(Reservations[].Instances[])" \
-                                    --output text || echo "0"
+                                    --output text || echo "0")
+                                    
+                                    if [ "$non_terminated" = "0" ]; then
+                                        echo "true"
+                                    else
+                                        echo "false"
+                                    fi
                                 ''',
                                 returnStdout: true
                             ).trim()
                             
-                            // Also check terraform state but look for resources, not just file existence
-                            def tfStateEmpty = false
-                            if (fileExists('/workspace/aws/terraform.tfstate')) {
-                                tfStateEmpty = sh(
-                                    script: 'grep -q \'"resources": \\[\\]\' terraform.tfstate && echo "true" || echo "false"',
-                                    returnStdout: true
-                                ).trim() == "true"
-                            }
+                            onlyTerminatedInstancesExist = allInstancesTerminated == "true"
+                            instanceExists = !onlyTerminatedInstancesExist
                             
-                            // True if there are instances or if state file exists with resources
-                            terraformStateExists = (instanceCount != '0' && instanceCount != '') || 
-                                                 (fileExists('/workspace/aws/terraform.tfstate') && !tfStateEmpty)
-                            
-                            echo "Terraform active state exists: ${terraformStateExists}"
-                            echo "Instance count: ${instanceCount}"
+                            echo "Only terminated instances exist: ${onlyTerminatedInstancesExist}"
+                            echo "Infrastructure exists in AWS: ${instanceExists}"
+                        } else {
+                            instanceExists = false
+                            onlyTerminatedInstancesExist = false
+                            echo "No instances found in AWS."
                         }
                     } catch (Exception e) {
-                        echo "Error checking terraform state: ${e.message}"
+                        echo "Error checking AWS instances: ${e.message}"
+                        instanceExists = false
+                        onlyTerminatedInstancesExist = false
                     }
                     
                     // Determine instance states
@@ -136,10 +139,16 @@ pipeline {
                     // Dynamic action choices
                     def actionChoices = []
                     def actionDescriptions = [:]
-                    if (!terraformStateExists) {
+                    
+                    // Always add Infrastructure Bootstrapping if there are no usable instances
+                    // (either no instances at all or only terminated instances)
+                    if (!instanceExists || onlyTerminatedInstancesExist) {
                         actionChoices.add("Infrastructure Bootstrapping")
                         actionDescriptions["Infrastructure Bootstrapping"] = "Creates the infrastructure for NaoServer."
-                    } else {
+                    } 
+                    
+                    // Only add these if we have actual usable instances
+                    if (instanceExists) {
                         actionChoices.add("Cluster Bootstrapping")
                         actionChoices.add("Application Deployment")
                         actionChoices.add("Destroy Infrastructure")
@@ -221,10 +230,11 @@ pipeline {
 
         stage('Infrastructure Bootstrapping') {
             when {
-                expression { params.ACTION == "Infrastructure Bootstrapping" }
+                expression { return params.ACTION == "Infrastructure Bootstrapping" }
             }
             steps {
                 dir("/workspace/aws") {
+                    echo "Running Infrastructure Bootstrapping..."
                     sh 'terraform init'
                     sh 'terraform plan -out=tfplan'
                     sh 'terraform apply -auto-approve tfplan'
@@ -234,7 +244,7 @@ pipeline {
         
         stage('Cluster Bootstrapping') {
             when {
-                expression { params.ACTION == "Cluster Bootstrapping" }
+                expression { return params.ACTION == "Cluster Bootstrapping" }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -251,7 +261,7 @@ pipeline {
         
         stage('Application Deployment') {
             when {
-                expression { params.ACTION == "Application Deployment" }
+                expression { return params.ACTION == "Application Deployment" }
             }
             steps {
                 dir("/workspace/ansible") {
@@ -277,7 +287,7 @@ pipeline {
         
         stage('Stop Server') {
             when {
-                expression { params.ACTION == "Stop running Server" }
+                expression { return params.ACTION == "Stop running Server" }
             }
             steps {
                 script {
@@ -309,7 +319,7 @@ pipeline {
         
         stage('Start Server') {
             when {
-                expression { params.ACTION == "Start Server" }
+                expression { return params.ACTION == "Start Server" }
             }
             steps {
                 script {
@@ -342,8 +352,8 @@ pipeline {
         stage('Destroy Infrastructure') {
             when {
                 allOf {
-                    expression { params.ACTION == "Destroy Infrastructure" }
-                    expression { params.DESTROY_CONFIRMATION == 'destroy' }
+                    expression { return params.ACTION == "Destroy Infrastructure" }
+                    expression { return params.DESTROY_CONFIRMATION == 'destroy' }
                 }
             }
             steps {
@@ -355,7 +365,7 @@ pipeline {
         
         stage('Display Addresses') {
             when {
-                expression { params.ACTION == "Display Addresses" }
+                expression { return params.ACTION == "Display Addresses" }
             }
             steps {
                 script {
