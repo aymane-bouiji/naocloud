@@ -18,7 +18,7 @@ pipeline {
 
                 - Detect Infrastructure State: Checks the current state of NaoServer.
                 - NaoServer Deployment: Creates infrastructure, configures cluster, and deploys applications.
-                - Start Server: Starts stopped EC2 instances tagged as master_instance or worker_instance.
+                - Start Server: Starts the stopped NaoServer .
                 - Stop running Server: Stops NaoServer running instances.
                 - Display Addresses: Displays IP addresses of NaoServer instances.
                 - Destroy Infrastructure: Destroys all NaoServer infrastructure (requires destroy confirmation).
