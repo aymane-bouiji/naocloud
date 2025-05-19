@@ -56,6 +56,7 @@ pipeline {
                     // Step 2: Cluster Bootstrapping
                     dir("/workspace/ansible") {
                         echo "Step 2/3: Cluster Bootstrapping..."
+                        sh "chmod 600 /workspace/aws/id_rsa "
                         sh "ansible-inventory -i aws_ec2.yaml --list"
                         sh """
                             ansible-playbook -i aws_ec2.yaml configure_cluster_playbook.yaml \
