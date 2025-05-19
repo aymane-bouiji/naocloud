@@ -12,14 +12,15 @@ pipeline {
     parameters {
         choice(
             name: 'ACTION',
-            choices: ['Detect Infrastructure State', 'NaoServer Deployment', 'Start Server', 'Stop running Server', 'Display Addresses', 'Destroy Infrastructure'],
+            choices: ['Detect Infrastructure State', 'NaoServer Deployment', 'Start Server', 'Stop running Server', 'Restart Server', 'Display Addresses', 'Destroy Infrastructure'],
             description: '''
                 Select an action to perform on the cloud infrastructure. Available actions:
 
                 - Detect Infrastructure State: Checks the current state of NaoServer.
                 - NaoServer Deployment: Creates infrastructure, configures cluster, and deploys applications.
-                - Start Server: Starts the stopped NaoServer .
+                - Start Server: Starts the stopped NaoServer.
                 - Stop running Server: Stops NaoServer running instances.
+                - Restart Server: Reboots all running NaoServer instances.
                 - Display Addresses: Displays IP addresses of NaoServer instances.
                 - Destroy Infrastructure: Destroys all NaoServer infrastructure (requires destroy confirmation).
             '''
@@ -193,11 +194,7 @@ pipeline {
             }
         }
 
-
-
-
-
-                stage('Restart Server') {
+        stage('Restart Server') {
             when {
                 expression { return params.ACTION == "Restart Server" }
             }
@@ -259,7 +256,6 @@ pipeline {
                 }
             }
         }
-
         
         stage('Destroy Infrastructure') {
             when {
