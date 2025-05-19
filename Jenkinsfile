@@ -192,6 +192,74 @@ pipeline {
                 }
             }
         }
+
+
+
+
+
+                stage('Restart Server') {
+            when {
+                expression { return params.ACTION == "Restart Server" }
+            }
+            steps {
+                script {
+                    try {
+                        // First check if there are any running instances
+                        def runningInstancesCheck = sh(
+                            script: '''
+                                export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+                                aws ec2 describe-instances \
+                                    --filters "Name=tag:Name,Values=master_instance,worker_instance" "Name=instance-state-name,Values=running,pending" \
+                                    --query "length(Reservations[].Instances[])" \
+                                    --output text || echo "0"
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                        
+                        if (runningInstancesCheck == '0' || runningInstancesCheck == '') {
+                            echo "WARNING: No running instances found with tags Name=master_instance or Name=worker_instance"
+                            echo "This action may not have any effect."
+                        }
+                    
+                        // Reboot instances and wait for them to reach running state
+                        sh '''
+                            export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+                            MASTER_IDS=$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=master_instance" "Name=instance-state-name,Values=running,pending" \
+                                --query "Reservations[].Instances[].InstanceId" \
+                                --output text)
+                            WORKER_IDS=$(aws ec2 describe-instances \
+                                --filters "Name=tag:Name,Values=worker_instance" "Name=instance-state-name,Values=running,pending" \
+                                --query "Reservations[].Instances[].InstanceId" \
+                                --output text)
+                            INSTANCE_IDS="$MASTER_IDS $WORKER_IDS"
+                            if [ -n "$INSTANCE_IDS" ]; then
+                                echo "Rebooting instances: $INSTANCE_IDS"
+                                aws ec2 reboot-instances --instance-ids $INSTANCE_IDS
+                                echo "Waiting for instances to complete rebooting and reach running state..."
+                                
+                                # Wait a moment for the reboot command to be processed
+                                sleep 10
+                                
+                                # Check each instance for running state
+                                for ID in $INSTANCE_IDS; do
+                                    echo "Waiting for instance $ID to reach running state..."
+                                    aws ec2 wait instance-running --instance-ids $ID
+                                    echo "Instance $ID has reached running state."
+                                done
+                                
+                                echo "All instances have been successfully rebooted."
+                            else
+                                echo "No running instances found with tags Name=master_instance or Name=worker_instance"
+                            fi
+                        '''
+                    } catch (Exception e) {
+                        error("Failed to restart servers: ${e.message}. Ensure AWS credentials and region (${AWS_DEFAULT_REGION}) are valid.")
+                    }
+                }
+            }
+        }
+
         
         stage('Destroy Infrastructure') {
             when {
