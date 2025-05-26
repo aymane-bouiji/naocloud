@@ -12,12 +12,12 @@ pipeline {
     parameters {
         choice(
             name: 'ACTION',
-            choices: ['Detect Infrastructure State', 'NaoServer Deployment', 'Start Server', 'Stop running Server', 'Restart Server', 'Display Addresses', 'Destroy Infrastructure'],
+            choices: ['Detect Infrastructure State', 'Deploy naoserver', 'Start Server', 'Stop running Server', 'Restart Server', 'Display Addresses', 'Destroy Infrastructure'],
             description: '''
                 Select an action to perform on the cloud infrastructure. Available actions:
 
                 - Detect Infrastructure State: Checks the current state of NaoServer.
-                - NaoServer Deployment: Creates infrastructure, configures cluster, and deploys applications.
+                - Deploy naoserver: Creates infrastructure, configures cluster, and deploys applications.
                 - Start Server: Starts the stopped NaoServer.
                 - Stop running Server: Stops NaoServer running instances.
                 - Restart Server: Reboots all running NaoServer instances.
@@ -26,12 +26,12 @@ pipeline {
             '''
         )
         string(
-            name: 'NaoCloud_Version',
+            name: 'naocloud_version',
             defaultValue: '23.09',
             description: 'NaoCloud version: please enter the version of naocloud release you want to install'
         )
         string(
-            name: 'DESTROY_CONFIRMATION',
+            name: 'destroy_confirmation',
             defaultValue: '',
             description: 'Type "destroy" to confirm deletion of the cloud environment (only needed for Destroy Infrastructure action)'
         )
@@ -40,7 +40,7 @@ pipeline {
     stages {
         stage('NaoServer Deployment') {
             when {
-                expression { return params.ACTION == "NaoServer Deployment" }
+                expression { return params.ACTION == "Deploy naoserver" }
             }
             steps {
                 script {
@@ -73,8 +73,8 @@ pipeline {
                             ansible-playbook -i aws_ec2.yaml configure_images_playbook.yaml \
                                 --private-key=/workspace/aws/id_rsa \
                                 -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
-                                -e \"naocloud_tag=${params.NaoCloud_Version}\" \
-                                -e \"naogizmo_tag=${params.NaoCloud_Version}\"
+                                -e \"naocloud_tag=${params.naocloud_version}\" \
+                                -e \"naogizmo_tag=${params.naocloud_version}\"
                         """
                         sh """
                             ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
@@ -219,7 +219,7 @@ pipeline {
             when {
                 allOf {
                     expression { return params.ACTION == "Destroy Infrastructure" }
-                    expression { return params.DESTROY_CONFIRMATION == 'destroy' }
+                    expression { return params.destroy_confirmation == 'destroy' }
                 }
             }
             steps {
