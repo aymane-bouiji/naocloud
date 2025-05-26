@@ -12,15 +12,15 @@ pipeline {
     parameters {
         choice(
             name: 'ACTION',
-            choices: ['Detect Infrastructure State', 'Deploy naoserver', 'Start Server', 'Stop running Server', 'Restart Server', 'Display Addresses', 'Destroy Infrastructure'],
+            choices: ['Detect Infrastructure State', 'Deploy NaoServer', 'Start NaoServer', 'Stop running NaoServer', 'Restart NaoServer', 'Display Addresses', 'Destroy Infrastructure'],
             description: '''
                 Select an action to perform on the cloud infrastructure. Available actions:
 
                 - Detect Infrastructure State: Checks the current state of NaoServer.
-                - Deploy naoserver: Creates infrastructure, configures cluster, and deploys applications.
-                - Start Server: Starts the stopped NaoServer.
-                - Stop running Server: Stops NaoServer running instances.
-                - Restart Server: Reboots all running NaoServer instances.
+                - Deploy NaoServer: Creates infrastructure, configures cluster, and deploys applications.
+                - Start NaoServer: Starts the stopped NaoServer.
+                - Stop running NaoServer: Stops NaoServer running instances.
+                - Restart NaoServer: Reboots all running NaoServer instances.
                 - Display Addresses: Displays IP addresses of NaoServer instances.
                 - Destroy Infrastructure: Destroys all NaoServer infrastructure (requires destroy confirmation).
             '''
@@ -38,9 +38,9 @@ pipeline {
     }
     
     stages {
-        stage('Deploy Naoserver ') {
+        stage('Deploy NaoServer') {
             when {
-                expression { return params.ACTION == "Deploy naoserver" }
+                expression { return params.ACTION == "Deploy NaoServer" }
             }
             steps {
                 script {
@@ -88,9 +88,9 @@ pipeline {
             }
         }
         
-        stage('Stop Server') {
+        stage('Stop NaoServer') {
             when {
-                expression { return params.ACTION == "Stop running Server" }
+                expression { return params.ACTION == "Stop running NaoServer" }
             }
             steps {
                 script {
@@ -135,15 +135,15 @@ pipeline {
                             fi
                         '''
                     } catch (Exception e) {
-                        error("Failed to stop servers: ${e.message}. Ensure AWS credentials and region (${AWS_DEFAULT_REGION}) are valid.")
+                        error("Failed to stop NaoServer: ${e.message}. Ensure AWS credentials and region (${AWS_DEFAULT_REGION}) are valid.")
                     }
                 }
             }
         }
         
-        stage('Start Server') {
+        stage('Start NaoServer') {
             when {
-                expression { return params.ACTION == "Start Server" }
+                expression { return params.ACTION == "Start NaoServer" }
             }
             steps {
                 script {
@@ -188,15 +188,15 @@ pipeline {
                             fi
                         '''
                     } catch (Exception e) {
-                        error("Failed to start servers: ${e.message}. Ensure AWS credentials and region (${AWS_DEFAULT_REGION}) are valid.")
+                        error("Failed to start NaoServer: ${e.message}. Ensure AWS credentials and region (${AWS_DEFAULT_REGION}) are valid.")
                     }
                 }
             }
         }
 
-        stage('Restart Server') {
+        stage('Restart NaoServer') {
             when {
-                expression { return params.ACTION == "Restart Server" }
+                expression { return params.ACTION == "Restart NaoServer" }
             }
             steps {
                 script {
