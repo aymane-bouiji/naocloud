@@ -28,7 +28,7 @@ pipeline {
         string(
             name: 'naocloud_version',
             defaultValue: '23.09',
-            description: 'NaoCloud version: please enter the version of naocloud release you want to install'
+            description: 'Naocloud version: please enter the version of naocloud release you want to install'
         )
         string(
             name: 'destroy_confirmation',
