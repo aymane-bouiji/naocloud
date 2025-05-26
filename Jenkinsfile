@@ -38,7 +38,7 @@ pipeline {
     }
     
     stages {
-        stage('NaoServer Deployment') {
+        stage('Deploy Naoserver ') {
             when {
                 expression { return params.ACTION == "Deploy naoserver" }
             }
