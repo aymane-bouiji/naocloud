@@ -28,7 +28,7 @@ pipeline {
         string(
             name: 'naocloud_version',
             defaultValue: '23.09',
-            description: 'Naocloud version: please enter the version of naocloud release you want to install'
+            description: 'Please enter the version of naocloud release you want to install'
         )
         string(
             name: 'destroy_confirmation',
@@ -47,7 +47,7 @@ pipeline {
                     echo "Running NaoServer Deployment (includes Infrastructure, Cluster, and Application)..."
                     
                     // Step 1: Infrastructure Bootstrapping
-                    dir("/workspace/aws") {
+                    dir("/workspace/infrastructure") {
                         echo "Step 1/3: Infrastructure Bootstrapping..."
                         sh 'terraform init'
                         sh 'terraform plan -out=tfplan'
@@ -55,30 +55,30 @@ pipeline {
                     }
                     
                     // Step 2: Cluster Bootstrapping
-                    dir("/workspace/ansible") {
+                    dir("/workspace/infrastructure-configuration") {
                         echo "Step 2/3: Cluster Bootstrapping..."
-                        sh "chmod 600 /workspace/aws/id_rsa "
+                        sh "chmod 600 /workspace/infrastructure/id_rsa "
                         sh "ansible-inventory -i aws_ec2.yaml --list"
                         sh """
                             ansible-playbook -i aws_ec2.yaml configure_cluster_playbook.yaml \
-                                --private-key=/workspace/aws/id_rsa \
+                                --private-key=/workspace/infrastructure/id_rsa \
                                 -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
                         """
                     }
                     
                     // Step 3: Application Deployment
-                    dir("/workspace/ansible") {
+                    dir("/workspace/infrastructure-configuration") {
                         echo "Step 3/3: Application Deployment..."
                         sh """
                             ansible-playbook -i aws_ec2.yaml configure_images_playbook.yaml \
-                                --private-key=/workspace/aws/id_rsa \
+                                --private-key=/workspace/infrastructure/id_rsa \
                                 -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
-                                -e \"naocloud_tag=${params.naocloud_version}\" \
-                                -e \"naogizmo_tag=${params.naocloud_version}\"
+                                -e \"naocloud_tag=${params.naocloud_version}\" 
+                                
                         """
                         sh """
                             ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
-                                --private-key=/workspace/aws/id_rsa \
+                                --private-key=/workspace/infrastructure/id_rsa \
                                 -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
                         """
                     }
@@ -200,12 +200,12 @@ pipeline {
             }
             steps {
                 script {
-                    dir("/workspace/ansible") {
+                    dir("/workspace/infrastructure-configuration") {
                         echo "Restarting NaoServer..."
                         
                         sh """
                             ansible-playbook -i aws_ec2.yaml restart-cluster-playbook.yaml \
-                                --private-key=/workspace/aws/id_rsa \
+                                --private-key=/workspace/infrastructure/id_rsa \
                                 -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
                         """
                     }
@@ -241,7 +241,7 @@ pipeline {
                             echo "WARNING: No infrastructure found to destroy. This action may not have any effect."
                         }
                         
-                        dir("/workspace/aws") {
+                        dir("/workspace/infrastructure") {
                             sh 'terraform destroy -auto-approve'
                         }
                     } catch (Exception e) {
