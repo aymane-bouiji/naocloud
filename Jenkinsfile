@@ -242,7 +242,7 @@ pipeline {
                         }
                         
                         dir("/workspace/infrastructure") {
-                            sh 'terraform destroy \
+                            sh 'terraform destroy  -auto-approve\
                                 -target=aws_default_security_group.default \
                                 -target=aws_instance.master_instance \
                                 -target=aws_instance.worker_instance \
