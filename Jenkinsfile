@@ -242,7 +242,17 @@ pipeline {
                         }
                         
                         dir("/workspace/infrastructure") {
-                            sh 'terraform destroy -auto-approve'
+                            sh 'terraform destroy \
+                                -target=aws_default_security_group.default \
+                                -target=aws_instance.master_instance \
+                                -target=aws_instance.worker_instance \
+                                -target=aws_volume_attachment.stateful_worker_attachment \
+                                -target=aws_key_pair.my_key \
+                                -target=aws_eip.worker_eips \
+                                -target=aws_route53_health_check.worker_health_check \
+                                -target=aws_route53_record.prem_dns_worker1 \
+                                -target=aws_route53_record.prem_dns_worker2 \
+                                -target=aws_route53_record.prem_dns_worker3'
                         }
                     } catch (Exception e) {
                         error("Failed to destroy infrastructure: ${e.message}")
