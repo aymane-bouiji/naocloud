@@ -46,12 +46,36 @@ pipeline {
                 script {
                     echo "Running NaoServer Deployment (includes Infrastructure, Cluster, and Application)..."
                     
-                   
+                    // Step 1: Infrastructure Bootstrapping
+                    dir("/workspace/infrastructure") {
+                        echo "Step 1/3: Infrastructure Bootstrapping..."
+                        sh 'terraform init'
+                        sh 'terraform plan -out=tfplan'
+                        sh 'terraform apply -auto-approve tfplan'
+                    }
+                    
+                    // Step 2: Cluster Bootstrapping
+                    dir("/workspace/infrastructure-configuration") {
+                        echo "Step 2/3: Cluster Bootstrapping..."
+                        sh "chmod 600 /workspace/infrastructure/id_rsa "
+                        sh "ansible-inventory -i aws_ec2.yaml --list"
+                        sh """
+                            ansible-playbook -i aws_ec2.yaml configure_cluster_playbook.yaml \
+                                --private-key=/workspace/infrastructure/id_rsa \
+                                -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" 
+                        """
+                    }
                     
                     // Step 3: Application Deployment
                     dir("/workspace/infrastructure-configuration") {
                         echo "Step 3/3: Application Deployment..."
-                        
+                        sh """
+                            ansible-playbook -i aws_ec2.yaml configure_images_playbook.yaml \
+                                --private-key=/workspace/infrastructure/id_rsa \
+                                -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no'\" \
+                                -e \"naocloud_tag=${params.naocloud_version}\" 
+                                
+                        """
                         sh """
                             ansible-playbook -i aws_ec2.yaml helm-playbook.yaml \
                                 --private-key=/workspace/infrastructure/id_rsa \
